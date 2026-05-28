@@ -23,6 +23,7 @@ from .actuator_analysis import (
     analyze_resonance,
     analyze_step_response,
     analyze_velocity_ramp,
+    compute_deflection,
     estimate_encoder_signs,
     fit_ratio,
 )
@@ -110,6 +111,50 @@ def _wait_after_move(
             last_fault_check = now
         time.sleep(0.02)
     return store.samples_since(start_index)
+
+
+def _sample_rate_hz(samples: list[TelemetrySample]) -> float:
+    if len(samples) < 2:
+        return 0.0
+    duration_s = (samples[-1].t_us - samples[0].t_us) / 1_000_000.0
+    if duration_s <= 0.0:
+        return 0.0
+    return (len(samples) - 1) / duration_s
+
+
+def _failed_resonance_result(
+    samples: list[TelemetrySample],
+    calibration: CalibrationConfig,
+    start_frequency_hz: float,
+    end_frequency_hz: float,
+    warning: str,
+) -> ResonanceResult:
+    deflection = compute_deflection(
+        samples,
+        calibration.output_per_motor,
+        calibration.output_offset_rad,
+    )
+    if len(deflection) > 0:
+        rms = (sum(value * value for value in deflection) / len(deflection)) ** 0.5
+        peak = max(abs(value) for value in deflection)
+    else:
+        rms = 0.0
+        peak = 0.0
+    return ResonanceResult(
+        sample_count=len(samples),
+        sample_rate_hz=_sample_rate_hz(samples),
+        start_frequency_hz=start_frequency_hz,
+        end_frequency_hz=end_frequency_hz,
+        peak_frequency_hz=None,
+        peak_gain=None,
+        peak_prominence_db=None,
+        bandwidth_hz=None,
+        q_factor=None,
+        rms_deflection_rad=rms,
+        peak_deflection_rad=peak,
+        pass_test=False,
+        warning=warning,
+    )
 
 
 def run_detection(client: ActuatorClient, progress: ProgressCallback | None = None) -> DetectionResult:
@@ -234,11 +279,11 @@ def run_resonance_test(
     safety: SafetyLimits | None = None,
     progress: ProgressCallback | None = None,
     *,
-    amplitude_rad: float = 0.08,
-    start_frequency_hz: float = 0.5,
-    end_frequency_hz: float = 20.0,
-    duration_s: float = 20.0,
-    max_deflection_rad: float = 0.12,
+    amplitude_rad: float = 0.18,
+    start_frequency_hz: float = 0.8,
+    end_frequency_hz: float = 75.0,
+    duration_s: float = 12.0,
+    max_deflection_rad: float = 0.25,
 ) -> ResonanceTestResult:
     limits = safety or SafetyLimits()
     limits.validate()
@@ -251,7 +296,7 @@ def run_resonance_test(
     _abort_on_faults(client)
     start_index = store.total_samples
 
-    _progress(progress, "Starting low-amplitude chirp")
+    _progress(progress, "Starting aggressive chirp")
     client.start_chirp(
         amplitude_rad=abs(limits.clamp_delta(amplitude_rad)),
         start_frequency_hz=start_frequency_hz,
@@ -266,14 +311,31 @@ def run_resonance_test(
         raise ActuatorError("not enough telemetry for resonance analysis")
 
     _progress(progress, "Analyzing resonance spectrum")
-    analysis = analyze_resonance(
-        samples,
-        calibration.output_per_motor,
-        calibration.output_offset_rad,
-        start_frequency_hz=start_frequency_hz,
-        end_frequency_hz=end_frequency_hz,
-        max_allowed_peak_deflection_rad=max_deflection_rad,
-    )
+    try:
+        analysis = analyze_resonance(
+            samples,
+            calibration.output_per_motor,
+            calibration.output_offset_rad,
+            start_frequency_hz=start_frequency_hz,
+            end_frequency_hz=end_frequency_hz,
+            max_allowed_peak_deflection_rad=max_deflection_rad,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        _progress(progress, message)
+        return ResonanceTestResult(
+            passed=False,
+            analysis=_failed_resonance_result(
+                samples,
+                calibration,
+                start_frequency_hz,
+                end_frequency_hz,
+                message,
+            ),
+            calibration=CalibrationConfig.from_dict(calibration.as_dict()),
+            sample_count=len(samples),
+            message=message,
+        )
     updated = CalibrationConfig.from_dict(calibration.as_dict())
     updated.resonance_frequency_hz = analysis.peak_frequency_hz
     updated.resonance_derating_enabled = analysis.peak_frequency_hz is not None
@@ -301,6 +363,7 @@ def run_step_response_test(
     *,
     calibration: CalibrationConfig | None = None,
     step_rad: float = 0.5,
+    settle_capture_s: float = 4.0,
 ) -> StepResponseResult:
     limits = safety or SafetyLimits()
     limits.validate()
@@ -316,7 +379,7 @@ def run_step_response_test(
 
     _progress(progress, "Running step response move")
     client.move_rel(delta, velocity, accel)
-    samples = _wait_after_move(client, store, start_index, abs(delta) / velocity + 1.5)
+    samples = _wait_after_move(client, store, start_index, abs(delta) / velocity + max(1.5, settle_capture_s))
     client.stop()
     if len(samples) < 20:
         raise ActuatorError("not enough telemetry for step response analysis")

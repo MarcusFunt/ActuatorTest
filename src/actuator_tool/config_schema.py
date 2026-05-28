@@ -17,12 +17,12 @@ def utc_timestamp() -> str:
 
 @dataclass
 class SafetyLimits:
-    max_velocity_rad_s: float = 8.0
-    max_accel_rad_s2: float = 60.0
+    max_velocity_rad_s: float = 40.0
+    max_accel_rad_s2: float = 1000.0
     jog_step_rad: float = 0.25
-    calibration_velocity_rad_s: float = 1.2
-    calibration_accel_rad_s2: float = 10.0
-    max_move_rad: float = 20.0
+    calibration_velocity_rad_s: float = 3.5
+    calibration_accel_rad_s2: float = 80.0
+    max_move_rad: float = 60.0
 
     def validate(self) -> None:
         for name, value in asdict(self).items():

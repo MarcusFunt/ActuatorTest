@@ -148,7 +148,9 @@ class VelocityRampResult:
     sample_count: int
     max_abs_velocity_rad_s: float
     rms_velocity_tracking_error_rad_s: float
+    p95_velocity_tracking_error_rad_s: float
     peak_velocity_tracking_error_rad_s: float
+    bad_tracking_error_fraction: float
     rms_deflection_rad: float
     peak_deflection_rad: float
     resonance_frequency_hz: float | None
@@ -525,32 +527,39 @@ def analyze_velocity_ramp(
 
     predicted_output_vel = motor_vel * output_per_motor
     tracking_error = output_vel - predicted_output_vel
+    abs_tracking_error = np.abs(tracking_error)
     deflection = compute_deflection(sample_list, output_per_motor, output_offset_rad)
     accel = _gradient(motor_vel, time_s)
     max_abs_vel = float(np.max(np.abs(motor_vel)))
     rms_error = float(math.sqrt(np.mean(np.square(tracking_error))))
-    peak_error = float(np.max(np.abs(tracking_error)))
+    p95_error = float(np.percentile(abs_tracking_error, 95))
+    peak_error = float(np.max(abs_tracking_error))
+    bad_tracking_error = abs_tracking_error > max_allowed_tracking_error_rad_s
+    bad_tracking_error_fraction = float(np.mean(bad_tracking_error))
     rms_deflection = float(math.sqrt(np.mean(np.square(deflection))))
     peak_deflection = float(np.max(np.abs(deflection)))
     resonance_freq = dominant_frequency(time_s, tracking_error)
     resonance_detected = bool(resonance_freq is not None and peak_deflection > max_allowed_deflection_rad * 0.75)
 
     recommended_velocity = default_velocity_limit_rad_s
-    if peak_error > max_allowed_tracking_error_rad_s or peak_deflection > max_allowed_deflection_rad:
-        high_error = np.abs(tracking_error) > max_allowed_tracking_error_rad_s
+    tracking_error_failed = p95_error > max_allowed_tracking_error_rad_s
+    deflection_failed = peak_deflection > max_allowed_deflection_rad
+    if tracking_error_failed or deflection_failed:
+        high_error = bad_tracking_error
         high_deflection = np.abs(deflection) > max_allowed_deflection_rad
         bad_velocity = np.abs(motor_vel[high_error | high_deflection])
         if len(bad_velocity):
-            recommended_velocity = max(0.1, float(np.min(bad_velocity) * 0.8))
+            recommended_velocity = max(0.1, float(np.percentile(bad_velocity, 10) * 0.8))
 
     recommended_accel = min(default_accel_limit_rad_s2, max(0.1, float(np.percentile(np.abs(accel), 90))))
 
     warnings: list[str] = []
-    if peak_error > max_allowed_tracking_error_rad_s:
+    if tracking_error_failed:
         warnings.append(
-            f"velocity tracking error {peak_error:.5f} rad/s exceeds {max_allowed_tracking_error_rad_s:.5f}"
+            f"95th percentile velocity tracking error {p95_error:.5f} rad/s exceeds "
+            f"{max_allowed_tracking_error_rad_s:.5f} rad/s"
         )
-    if peak_deflection > max_allowed_deflection_rad:
+    if deflection_failed:
         warnings.append(f"deflection {peak_deflection:.5f} rad exceeds {max_allowed_deflection_rad:.5f}")
     if resonance_detected:
         warnings.append("possible resonance region detected")
@@ -559,10 +568,12 @@ def analyze_velocity_ramp(
         sample_count=len(sample_list),
         max_abs_velocity_rad_s=max_abs_vel,
         rms_velocity_tracking_error_rad_s=rms_error,
+        p95_velocity_tracking_error_rad_s=p95_error,
         peak_velocity_tracking_error_rad_s=peak_error,
+        bad_tracking_error_fraction=bad_tracking_error_fraction,
         rms_deflection_rad=rms_deflection,
         peak_deflection_rad=peak_deflection,
-        resonance_frequency_hz=resonance_freq,
+        resonance_frequency_hz=resonance_freq if resonance_detected else None,
         resonance_detected=resonance_detected,
         recommended_velocity_limit_rad_s=recommended_velocity,
         recommended_accel_limit_rad_s2=recommended_accel,
@@ -643,7 +654,7 @@ def analyze_resonance(
         raise ValueError("telemetry sample interval must be positive")
     sample_rate = 1.0 / dt
     nyquist = sample_rate / 2.0
-    if sample_rate < end_frequency_hz * 2.5:
+    if sample_rate < end_frequency_hz * 2.0:
         raise ValueError(
             f"sample rate {sample_rate:.2f} Hz is too low for {end_frequency_hz:.2f} Hz resonance analysis"
         )

@@ -1,3 +1,4 @@
+import inspect
 import time
 
 import pytest
@@ -16,6 +17,19 @@ def wait_for_samples(store: TelemetryStore, count: int, timeout_s: float = 2.0):
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {count} samples")
+
+
+def test_resonance_defaults_are_aggressive():
+    runner_defaults = inspect.signature(run_resonance_test).parameters
+    client_defaults = inspect.signature(ActuatorClient.start_chirp).parameters
+
+    assert runner_defaults["amplitude_rad"].default >= 0.18
+    assert runner_defaults["start_frequency_hz"].default <= 0.8
+    assert runner_defaults["end_frequency_hz"].default == 75.0
+    assert runner_defaults["duration_s"].default <= 12.0
+    assert runner_defaults["max_deflection_rad"].default >= 0.25
+    assert client_defaults["amplitude_rad"].default == runner_defaults["amplitude_rad"].default
+    assert client_defaults["end_frequency_hz"].default == runner_defaults["end_frequency_hz"].default
 
 
 def test_simulator_connection_and_motion_flow():
@@ -151,6 +165,48 @@ def test_resonance_test_reports_abort_threshold_failure():
         except (ActuatorCommandError, ValueError):
             return
         assert not result.passed
+    finally:
+        client.disconnect()
+
+
+def test_resonance_test_returns_structured_failure_when_analysis_rejects_data(monkeypatch):
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(sample_hz=200.0), store)
+    client.connect()
+    try:
+        limits = SafetyLimits(max_velocity_rad_s=20.0, calibration_velocity_rad_s=3.0)
+        calibration = run_ratio_calibration(
+            client,
+            store,
+            client.info(),
+            limits,
+            motor_sweep_rad=2.0,
+            residual_threshold_rad=0.2,
+        ).calibration
+
+        def reject_resonance(*_args, **_kwargs):
+            raise ValueError("resonance peak is not prominent enough")
+
+        monkeypatch.setattr("actuator_tool.actuator_tests.analyze_resonance", reject_resonance)
+        result = run_resonance_test(
+            client,
+            store,
+            calibration,
+            limits,
+            amplitude_rad=0.06,
+            start_frequency_hz=2.0,
+            end_frequency_hz=15.0,
+            duration_s=3.0,
+            max_deflection_rad=0.5,
+        )
+
+        assert not result.passed
+        assert not result.analysis.pass_test
+        assert result.analysis.peak_frequency_hz is None
+        assert result.sample_count == result.analysis.sample_count
+        assert result.calibration.resonance_frequency_hz is None
+        assert result.calibration.resonance_derating_enabled is False
+        assert result.message
     finally:
         client.disconnect()
 

@@ -212,10 +212,14 @@ def _run_backlash() -> None:
     result = run_backlash_test(c.require_client(), c.store, c.calibration, c.safety, c.set_status)
     c.calibration.backlash_motor_rad = result.backlash_motor_rad
     c.calibration.backlash_output_rad = result.backlash_output_rad
+    c.calibration.backlash_comp_enabled = bool(result.pass_test and result.backlash_motor_rad > 1e-4)
     if result.warning:
         c.warnings.append(result.warning)
     if c.report:
         c.report.events.write("backlash_test", result.as_dict())
+        c.report.save_calibration(c.calibration)
+        write_summary(c.report.artifacts.summary_txt, info=c.info, telemetry_store=c.store,
+                      ratio_fit=c.ratio_fit, calibration=c.calibration, warnings=c.warnings)
     c.set_status("Backlash passed" if result.pass_test else result.warning or "Backlash failed")
 
 
@@ -228,6 +232,9 @@ def _run_step_response() -> None:
         c.warnings.append(result.warning)
     if c.report:
         c.report.events.write("step_response_test", result.as_dict())
+        c.report.save_calibration(c.calibration)
+        write_summary(c.report.artifacts.summary_txt, info=c.info, telemetry_store=c.store,
+                      ratio_fit=c.ratio_fit, calibration=c.calibration, warnings=c.warnings)
     c.set_status("Step response passed" if result.pass_test else result.warning or "Step response failed")
 
 
@@ -242,6 +249,9 @@ def _run_velocity_ramp() -> None:
         c.warnings.append(result.warning)
     if c.report:
         c.report.events.write("velocity_ramp_test", result.as_dict())
+        c.report.save_calibration(c.calibration)
+        write_summary(c.report.artifacts.summary_txt, info=c.info, telemetry_store=c.store,
+                      ratio_fit=c.ratio_fit, calibration=c.calibration, warnings=c.warnings)
     c.set_status("Velocity ramp passed" if result.pass_test else result.warning or "Velocity ramp failed")
 
 
@@ -253,16 +263,25 @@ def _run_compliance() -> None:
         c.warnings.append(result.warning)
     if c.report:
         c.report.events.write("compliance_test", result.as_dict())
+        c.report.save_calibration(c.calibration)
+        write_summary(c.report.artifacts.summary_txt, info=c.info, telemetry_store=c.store,
+                      ratio_fit=c.ratio_fit, calibration=c.calibration, warnings=c.warnings)
     c.set_status("Compliance passed" if result.pass_test else result.warning or "Compliance failed")
 
 
 def _run_auto() -> None:
+    _run_detection()
     _run_encoder_sanity()
     _run_ratio()
     _run_resonance()
+    _run_backlash()
+    _run_step_response()
+    _run_velocity_ramp()
+    _run_compliance()
+    _save_config()
     if _ctx.report:
-        _ctx.report.events.write("auto_characterization", {})
-    _ctx.set_status("Auto-characterization complete")
+        _ctx.report.events.write("auto_characterization", {"scope": "full_hardware_suite"})
+    _ctx.set_status("Full auto-characterization complete; calibration saved to actuator")
 
 
 def _save_config() -> None:
@@ -633,16 +652,16 @@ def _lbl(text: str) -> rx.Component:
 
 
 def _val(v) -> rx.Component:
-    return rx.text(v, size="2", font_family="monospace")
+    return rx.text(v, size="2", font_family="monospace", color=rx.color("gray", 12))
 
 
 def _sec(title: str) -> rx.Component:
     return rx.hstack(
-        rx.text(title, weight="bold", size="2"),
+        rx.text(title, weight="bold", size="2", color=rx.color("gray", 12)),
         rx.divider(orientation="horizontal", flex="1"),
         align="center",
         width="100%",
-        padding_y="2px",
+        padding_y="4px",
     )
 
 
@@ -652,20 +671,120 @@ def _btn(
     disabled=False,
     color: str = "blue",
     size: str = "1",
+    **extra_props,
 ) -> rx.Component:
-    return rx.button(label, on_click=handler, disabled=disabled, color_scheme=color, size=size)
+    props = {
+        "min_height": "30px",
+    }
+    props.update(extra_props)
+    return rx.button(
+        label,
+        on_click=handler,
+        disabled=disabled,
+        color_scheme=color,
+        size=size,
+        **props,
+    )
+
+
+def _empty(v) -> rx.Component:
+    return rx.cond(v != "", _val(v), rx.text("not connected", size="1", color=rx.color("gray", 9)))
+
+
+def _panel(
+    *children,
+    flex: str | None = None,
+    min_width: str = "0",
+    **extra_props,
+) -> rx.Component:
+    props = {
+        "padding": "14px",
+        "border": f"1px solid {rx.color('gray', 6)}",
+        "border_radius": "8px",
+        "background": rx.color("gray", 2),
+        "width": "100%",
+        "min_width": min_width,
+    }
+    if flex is not None:
+        props["flex"] = flex
+    props.update(extra_props)
+    return rx.box(
+        rx.vstack(
+            *children,
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        **props,
+    )
+
+
+def _chip(label: str, value, color: str = "gray") -> rx.Component:
+    return rx.box(
+        rx.hstack(
+            rx.text(label, size="1", color=rx.color("gray", 10)),
+            rx.text(value, size="1", weight="medium", color=rx.color("gray", 12)),
+            spacing="2",
+            align="center",
+        ),
+        padding_x="10px",
+        height="30px",
+        border=f"1px solid {rx.color(color, 6)}",
+        border_radius="999px",
+        background=rx.color(color, 3),
+        display="flex",
+        align_items="center",
+    )
+
+
+def header_panel() -> rx.Component:
+    return rx.box(
+        rx.vstack(
+            rx.vstack(
+                rx.text("Actuator Bench Tool", size="5", weight="bold", line_height="1.1"),
+                rx.text(
+                    "Calibration, characterization, and report capture",
+                    size="2",
+                    color=rx.color("gray", 10),
+                ),
+                spacing="1",
+                align="start",
+            ),
+            rx.hstack(
+                rx.cond(
+                    State.connected,
+                    _chip("State", "Connected", "green"),
+                    _chip("State", "Disconnected", "gray"),
+                ),
+                _chip("Mode", rx.cond(State.mode_name != "", State.mode_name, "Idle")),
+                _chip("Samples", State.sample_count),
+                spacing="2",
+                wrap="wrap",
+                justify="start",
+            ),
+            width="100%",
+            align="start",
+            spacing="3",
+        ),
+        padding="16px",
+        border=f"1px solid {rx.color('gray', 6)}",
+        border_radius="8px",
+        background=rx.color("gray", 2),
+        width="100%",
+    )
 
 
 # ── Panels ────────────────────────────────────────────────────────────────────
 
 def connection_panel() -> rx.Component:
-    return rx.vstack(
+    return _panel(
         _sec("Connection"),
         rx.hstack(
             rx.checkbox("Simulator", checked=State.use_sim, on_change=State.set_use_sim),
-            _btn("Scan", State.scan_ports, color="gray"),
+            _btn("Scan", State.scan_ports, color="gray", width="92px"),
             align="center",
-            spacing="3",
+            justify="between",
+            width="100%",
         ),
         rx.select(
             State.available_ports,
@@ -673,74 +792,73 @@ def connection_panel() -> rx.Component:
             on_change=State.set_port,
             placeholder="Select serial port…",
             width="100%",
-            size="1",
+            size="2",
         ),
         rx.hstack(
-            _btn("Connect",    State.do_connect,    disabled=State.connected | State.busy),
-            _btn("Disconnect", State.do_disconnect, disabled=~State.connected | State.busy, color="red"),
+            _btn("Connect",    State.do_connect,    disabled=State.connected | State.busy, flex="1", size="2"),
+            _btn("Disconnect", State.do_disconnect, disabled=~State.connected | State.busy, color="red", flex="1", size="2"),
             spacing="2",
+            width="100%",
         ),
         rx.divider(),
         rx.grid(
-            _lbl("Actuator ID"), _val(State.actuator_id),
-            _lbl("Firmware"),    _val(State.firmware),
-            _lbl("Hardware"),    _val(State.hardware),
-            _lbl("Mode"),        _val(State.mode_name),
-            _lbl("Faults"),      _val(State.fault_text),
+            _lbl("Actuator ID"), _empty(State.actuator_id),
+            _lbl("Firmware"),    _empty(State.firmware),
+            _lbl("Hardware"),    _empty(State.hardware),
+            _lbl("Mode"),        _empty(State.mode_name),
+            _lbl("Faults"),      _empty(State.fault_text),
             columns="2",
-            spacing="1",
+            spacing="2",
             width="100%",
         ),
-        spacing="2",
-        width="100%",
-        align="start",
     )
 
 
 def control_panel() -> rx.Component:
-    return rx.vstack(
+    return _panel(
         _sec("Manual Control"),
         rx.hstack(
-            _btn("Disabled",    State.mode_disabled,    disabled=~State.can_control),
-            _btn("Calibration", State.mode_calibration, disabled=~State.can_control),
+            _btn("Disabled",    State.mode_disabled,    disabled=~State.can_control, flex="1"),
+            _btn("Calibration", State.mode_calibration, disabled=~State.can_control, flex="1"),
             spacing="2",
+            width="100%",
         ),
         rx.hstack(
-            _btn("Stop",  State.do_stop,  disabled=~State.can_control, color="orange"),
-            _btn("ESTOP", State.do_estop, disabled=~State.can_control, color="red"),
+            _btn("Stop",  State.do_stop,  disabled=~State.can_control, color="orange", flex="1"),
+            _btn("ESTOP", State.do_estop, disabled=~State.can_control, color="red", flex="1"),
             spacing="2",
+            width="100%",
         ),
         rx.hstack(
             rx.input(
                 value=State.jog_step.to_string(),
-                on_blur=State.set_jog_step,
-                width="70px",
+                on_change=State.set_jog_step,
+                width="78px",
                 size="1",
             ),
             rx.text("rad", size="1"),
-            _btn("◀ Jog", State.jog_neg, disabled=~State.can_test),
-            _btn("Jog ▶", State.jog_pos, disabled=~State.can_test),
+            _btn("◀ Jog", State.jog_neg, disabled=~State.can_test, flex="1"),
+            _btn("Jog ▶", State.jog_pos, disabled=~State.can_test, flex="1"),
             spacing="2",
             align="center",
+            width="100%",
         ),
         rx.grid(
-            _lbl("Move Δ (rad)"),   rx.input(value=State.move_delta.to_string(),    on_blur=State.set_move_delta,    size="1"),
-            _lbl("Velocity (rad/s)"), rx.input(value=State.move_velocity.to_string(), on_blur=State.set_move_velocity, size="1"),
-            _lbl("Accel (rad/s²)"),   rx.input(value=State.move_accel.to_string(),    on_blur=State.set_move_accel,    size="1"),
+            _lbl("Move Δ (rad)"),    rx.input(value=State.move_delta.to_string(),    on_change=State.set_move_delta,    size="1", width="100%"),
+            _lbl("Velocity (rad/s)"), rx.input(value=State.move_velocity.to_string(), on_change=State.set_move_velocity, size="1", width="100%"),
+            _lbl("Accel (rad/s²)"),   rx.input(value=State.move_accel.to_string(),    on_change=State.set_move_accel,    size="1", width="100%"),
             columns="2",
-            spacing="1",
+            spacing="2",
             width="100%",
         ),
         rx.hstack(
-            _btn("Move Relative", State.do_move_rel,  disabled=~State.can_test),
-            _btn("Zero Motor",    State.zero_motor,   disabled=~State.can_test),
-            _btn("Zero Output",   State.zero_output,  disabled=~State.can_test),
+            _btn("Move Relative", State.do_move_rel,  disabled=~State.can_test, flex="1"),
+            _btn("Zero Motor",    State.zero_motor,   disabled=~State.can_test, flex="1"),
+            _btn("Zero Output",   State.zero_output,  disabled=~State.can_test, flex="1"),
             spacing="2",
             wrap="wrap",
+            width="100%",
         ),
-        spacing="2",
-        width="100%",
-        align="start",
     )
 
 
@@ -755,87 +873,97 @@ def tests_panel() -> rx.Component:
         ("Velocity Ramp Test",       State.run_velocity_ramp,   ~State.can_test),
         ("Compliance / Load Test",   State.run_compliance,      ~State.can_test),
     ]
-    return rx.vstack(
+    return _panel(
         _sec("Calibration / Tests"),
-        *[_btn(lbl, h, disabled=d, color="blue") for lbl, h, d in btns],
-        _btn("Full Auto-characterization",    State.run_auto,    disabled=~State.can_test, color="green"),
-        _btn("Save Calibration to Actuator",  State.save_config, disabled=~State.can_test, color="amber"),
-        _btn("Export Report",                 State.export_report, disabled=~State.connected),
-        spacing="1",
-        width="100%",
-        align="start",
+        *[_btn(lbl, h, disabled=d, color="blue", width="100%") for lbl, h, d in btns],
+        _btn("Full Auto-characterization",    State.run_auto,    disabled=~State.can_test, color="green", width="100%"),
+        _btn("Save Calibration to Actuator",  State.save_config, disabled=~State.can_test, color="amber", width="100%"),
+        _btn("Export Report",                 State.export_report, disabled=~State.connected, width="100%"),
     )
 
 
 def results_panel() -> rx.Component:
-    return rx.box(
-        rx.vstack(
-            _sec("Results"),
-            rx.grid(
-                _lbl("Ratio"),           _val(State.ratio_str),
-                _lbl("Offset"),          _val(State.offset_str),
-                _lbl("Fit error"),       _val(State.fit_error_str),
-                _lbl("Hysteresis"),      _val(State.hysteresis_str),
-                _lbl("Resonance"),       _val(State.resonance_str),
-                _lbl("Samples / drop"),  rx.hstack(_val(State.sample_count), rx.text("/", size="1"), _val(State.dropped), spacing="1"),
-                columns="2",
-                spacing="1",
-                width="100%",
-            ),
-            _lbl("Warnings"),
-            rx.text(State.warnings_text, size="1", color=rx.color("amber", 11), white_space="pre-wrap"),
+    return _panel(
+        _sec("Results"),
+        rx.grid(
+            _lbl("Ratio"),           _val(State.ratio_str),
+            _lbl("Offset"),          _val(State.offset_str),
+            _lbl("Fit error"),       _val(State.fit_error_str),
+            _lbl("Hysteresis"),      _val(State.hysteresis_str),
+            _lbl("Resonance"),       _val(State.resonance_str),
+            _lbl("Samples / drop"),  rx.hstack(_val(State.sample_count), rx.text("/", size="1"), _val(State.dropped), spacing="1"),
+            columns="2",
             spacing="2",
-            align="start",
             width="100%",
         ),
-        padding="12px",
-        border=f"1px solid {rx.color('gray', 6)}",
-        border_radius="6px",
+        _lbl("Warnings"),
+        rx.text(State.warnings_text, size="1", color=rx.color("amber", 11), white_space="pre-wrap"),
         flex="1",
         min_width="260px",
     )
 
 
 def report_panel() -> rx.Component:
-    return rx.box(
-        rx.vstack(
-            _sec("Report / Log"),
-            rx.text(State.report_folder, size="1", font_family="monospace", color=rx.color("gray", 10)),
-            rx.hstack(
-                rx.text_area(
-                    value=State.notes,
-                    on_change=State.set_notes,
-                    placeholder="Notes…",
-                    rows="3",
-                    flex="1",
-                    size="1",
-                ),
-                rx.vstack(
-                    _btn("Open Folder", State.open_folder, color="gray"),
-                    spacing="1",
-                ),
-                align="start",
-                width="100%",
-                spacing="2",
+    return _panel(
+        _sec("Report / Log"),
+        rx.text(State.report_folder, size="1", font_family="monospace", color=rx.color("gray", 10)),
+        rx.hstack(
+            rx.text_area(
+                value=State.notes,
+                on_change=State.set_notes,
+                placeholder="Notes…",
+                rows="3",
+                flex="1",
+                size="1",
             ),
-            spacing="2",
+            rx.vstack(
+                _btn("Open Folder", State.open_folder, color="gray"),
+                spacing="1",
+            ),
             align="start",
             width="100%",
+            spacing="2",
         ),
-        padding="12px",
-        border=f"1px solid {rx.color('gray', 6)}",
-        border_radius="6px",
         flex="1",
         min_width="260px",
     )
 
 
 def plots_panel() -> rx.Component:
-    return rx.el.iframe(
-        src=f"http://localhost:{BOKEH_PORT}",
+    return _panel(
+        _sec("Live Telemetry"),
+        rx.box(
+            rx.el.iframe(
+                src=f"http://localhost:{BOKEH_PORT}",
+                width="100%",
+                height="430px",
+                style={"border": "none", "display": "block", "border_radius": "6px"},
+            ),
+            rx.cond(
+                State.sample_count == 0,
+                rx.box(
+                    rx.vstack(
+                        rx.text("No telemetry yet", size="3", weight="medium"),
+                        rx.text("Connect to start the stream", size="1", color=rx.color("gray", 10)),
+                        spacing="1",
+                        align="center",
+                    ),
+                    position="absolute",
+                    top="46%",
+                    left="50%",
+                    transform="translate(-50%, -50%)",
+                    padding="12px 16px",
+                    border=f"1px solid {rx.color('gray', 6)}",
+                    border_radius="8px",
+                    background=rx.color("gray", 2),
+                    pointer_events="none",
+                ),
+                rx.fragment(),
+            ),
+            position="relative",
+            width="100%",
+        ),
         width="100%",
-        height="780px",
-        style={"border": "none", "display": "block"},
     )
 
 
@@ -849,18 +977,21 @@ def index() -> rx.Component:
                     connection_panel(),
                     control_panel(),
                     tests_panel(),
-                    padding="12px",
-                    spacing="4",
+                    padding="14px",
+                    padding_bottom="48px",
+                    spacing="3",
                     width="100%",
                 ),
                 type="auto",
                 width="340px",
                 min_width="340px",
-                height="100vh",
+                height="calc(100vh - 32px)",
+                background=rx.color("gray", 1),
                 style={"border_right": f"1px solid {rx.color('gray', 6)}"},
             ),
             # ── Right main area ───────────────────────────────────────
             rx.vstack(
+                header_panel(),
                 plots_panel(),
                 rx.hstack(
                     results_panel(),
@@ -868,17 +999,23 @@ def index() -> rx.Component:
                     spacing="3",
                     width="100%",
                     align="stretch",
+                    wrap="wrap",
                 ),
                 flex="1",
+                min_width="0",
                 overflow_y="auto",
-                padding="12px",
+                padding="14px",
+                padding_bottom="48px",
                 spacing="3",
                 align="start",
-                height="100vh",
+                height="calc(100vh - 32px)",
+                background=rx.color("gray", 1),
             ),
             width="100%",
+            min_width="0",
             spacing="0",
             align="start",
+            background=rx.color("gray", 1),
         ),
         # ── Status bar ────────────────────────────────────────────────
         rx.box(
@@ -886,7 +1023,11 @@ def index() -> rx.Component:
                 rx.cond(
                     State.busy,
                     rx.spinner(size="1"),
-                    rx.icon("circle", size=10, color="green"),
+                    rx.cond(
+                        State.connected,
+                        rx.icon("circle", size=10, color="green"),
+                        rx.icon("circle", size=10, color=rx.color("gray", 9)),
+                    ),
                 ),
                 rx.text(State.status, size="1"),
                 spacing="2",

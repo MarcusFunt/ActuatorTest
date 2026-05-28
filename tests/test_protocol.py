@@ -22,6 +22,8 @@ from actuator_tool.actuator_protocol import (
     unpack_chirp_payload,
     unpack_move_output_rel_payload,
 )
+from actuator_tool.actuator_serial import ActuatorClient, SimulatedTransport
+from actuator_tool.config_schema import SafetyLimits
 
 
 def test_firmware_payload_limit_matches_host_protocol():
@@ -30,6 +32,35 @@ def test_firmware_payload_limit_matches_host_protocol():
 
     assert match is not None
     assert int(match.group(1)) == MAX_PAYLOAD_SIZE == 4096
+
+
+def test_aggressive_motion_defaults_match_firmware_contract():
+    firmware = Path("firmware/ActuatorFirmware/ActuatorFirmware.ino").read_text(encoding="utf-8")
+    limits = SafetyLimits()
+    client = ActuatorClient(SimulatedTransport())
+
+    current_match = re.search(r"#define MOTOR_RMS_CURRENT_MA\s+(\d+)", firmware)
+    velocity_match = re.search(r"#define MAX_VELOCITY_RAD_S\s+([0-9.]+)f", firmware)
+    accel_match = re.search(r"#define MAX_ACCEL_RAD_S2\s+([0-9.]+)f", firmware)
+    move_match = re.search(r"#define MAX_MOVE_RAD\s+([0-9.]+)f", firmware)
+    step_rate_match = re.search(r"#define MAX_STEP_RATE_SPS\s+([0-9.]+)f", firmware)
+    min_interval_match = re.search(r"#define MIN_STEP_INTERVAL_US\s+(\d+)UL", firmware)
+    telemetry_match = re.search(r"#define TELEMETRY_HZ\s+(\d+)UL", firmware)
+
+    assert current_match is not None
+    assert velocity_match is not None
+    assert accel_match is not None
+    assert move_match is not None
+    assert step_rate_match is not None
+    assert min_interval_match is not None
+    assert telemetry_match is not None
+    assert int(current_match.group(1)) == 1000
+    assert float(velocity_match.group(1)) == limits.max_velocity_rad_s == client.max_velocity_rad_s == 40.0
+    assert float(accel_match.group(1)) == limits.max_accel_rad_s2 == client.max_accel_rad_s2 == 1000.0
+    assert float(move_match.group(1)) == limits.max_move_rad == 60.0
+    assert float(step_rate_match.group(1)) >= 60_000.0
+    assert int(min_interval_match.group(1)) <= 17
+    assert int(telemetry_match.group(1)) >= 500
 
 
 def test_crc16_ccitt_false_standard_check_value():

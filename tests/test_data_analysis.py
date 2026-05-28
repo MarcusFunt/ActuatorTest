@@ -199,7 +199,75 @@ def test_velocity_ramp_analysis_recommends_limits_when_errors_high():
     )
 
     assert not result.pass_test
+    assert result.p95_velocity_tracking_error_rad_s > 0.5
     assert result.recommended_velocity_limit_rad_s < 8.0
+
+
+def test_velocity_ramp_ignores_short_tracking_spikes_for_limit():
+    samples = []
+    for i in range(200):
+        motor_vel = 6.0
+        motor = i * 0.03
+        expected_output = 0.25 * motor + 0.01
+        output_vel = motor_vel * 0.25
+        if i in {25, 100, 150}:
+            output_vel += 1.2
+        samples.append(
+            sample(
+                i,
+                motor=motor,
+                output=expected_output + 0.004,
+                motor_vel=motor_vel,
+                output_vel=output_vel,
+            )
+        )
+
+    result = analyze_velocity_ramp(
+        samples,
+        0.25,
+        0.01,
+        max_allowed_tracking_error_rad_s=0.5,
+        max_allowed_deflection_rad=0.08,
+    )
+
+    assert result.pass_test
+    assert result.peak_velocity_tracking_error_rad_s > 0.5
+    assert result.p95_velocity_tracking_error_rad_s < 0.5
+    assert result.bad_tracking_error_fraction < 0.05
+    assert result.recommended_velocity_limit_rad_s == pytest.approx(8.0)
+
+
+def test_velocity_ramp_does_not_report_frequency_without_resonant_deflection():
+    samples = []
+    sample_hz = 100.0
+    for i in range(200):
+        t = i / sample_hz
+        motor = i * 0.02
+        motor_vel = 2.0
+        output_vel = 0.5 + 0.6 * math.sin(2.0 * math.pi * 7.0 * t)
+        samples.append(
+            sample(
+                i,
+                motor=motor,
+                output=0.25 * motor + 0.01 + 0.001 * math.sin(2.0 * math.pi * 7.0 * t),
+                t_us=int(t * 1_000_000),
+                motor_vel=motor_vel,
+                output_vel=output_vel,
+            )
+        )
+
+    result = analyze_velocity_ramp(
+        samples,
+        0.25,
+        0.01,
+        max_allowed_tracking_error_rad_s=0.5,
+        max_allowed_deflection_rad=0.08,
+    )
+
+    assert not result.pass_test
+    assert result.resonance_detected is False
+    assert result.resonance_frequency_hz is None
+    assert "possible resonance" not in result.warning
 
 
 def test_compliance_analysis_known_mass_arm_stiffness():
@@ -249,6 +317,31 @@ def test_resonance_analysis_detects_known_signal():
     assert abs(result.peak_frequency_hz - 8.0) < 0.25
     assert result.peak_prominence_db is not None
     assert result.peak_prominence_db > 6.0
+
+
+def test_resonance_analysis_accepts_75hz_sweep_at_hardware_sample_rate():
+    samples = []
+    sample_hz = 169.0
+    frequency_hz = 68.0
+    for i in range(int(sample_hz * 4.0)):
+        t = i / sample_hz
+        motor = 0.18 * math.sin(2.0 * math.pi * frequency_hz * t)
+        deflection = 0.02 * math.sin(2.0 * math.pi * frequency_hz * t)
+        samples.append(
+            sample(
+                i,
+                motor=motor,
+                output=0.25 * motor + 0.01 + deflection,
+                t_us=int(t * 1_000_000),
+                motor_vel=0.0,
+                output_vel=0.0,
+            )
+        )
+
+    result = analyze_resonance(samples, 0.25, 0.01, start_frequency_hz=10.0, end_frequency_hz=75.0)
+
+    assert result.peak_frequency_hz is not None
+    assert abs(result.peak_frequency_hz - frequency_hz) < 1.0
 
 
 def test_resonance_analysis_rejects_too_few_samples():

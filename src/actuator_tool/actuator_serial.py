@@ -175,11 +175,11 @@ class SimulatedTransport:
         self._chirp_active = False
         self._chirp_started_at = 0.0
         self._chirp_center_motor_rad = 0.0
-        self._chirp_amplitude_rad = 0.08
-        self._chirp_start_hz = 0.5
-        self._chirp_end_hz = 20.0
-        self._chirp_duration_s = 20.0
-        self._chirp_max_deflection_rad = 0.12
+        self._chirp_amplitude_rad = 0.18
+        self._chirp_start_hz = 0.8
+        self._chirp_end_hz = 75.0
+        self._chirp_duration_s = 12.0
+        self._chirp_max_deflection_rad = 0.25
         self.pid_enabled = False
         self.pid_kp = 0.0
         self.pid_ki = 0.0
@@ -687,8 +687,8 @@ class ActuatorClient:
     def __init__(self, transport: Transport, telemetry_store: TelemetryStore | None = None) -> None:
         self.transport = transport
         self.telemetry_store = telemetry_store or TelemetryStore()
-        self.max_velocity_rad_s = 8.0
-        self.max_accel_rad_s2 = 60.0
+        self.max_velocity_rad_s = 40.0
+        self.max_accel_rad_s2 = 1000.0
         self._parser = PacketParser()
         self._responses: queue.Queue[CommandResponse] = queue.Queue()
         self._telemetry_callbacks: list[TelemetryCallback] = []
@@ -867,11 +867,11 @@ class ActuatorClient:
 
     def start_chirp(
         self,
-        amplitude_rad: float = 0.08,
-        start_frequency_hz: float = 0.5,
-        end_frequency_hz: float = 20.0,
-        duration_s: float = 20.0,
-        max_deflection_rad: float = 0.12,
+        amplitude_rad: float = 0.18,
+        start_frequency_hz: float = 0.8,
+        end_frequency_hz: float = 75.0,
+        duration_s: float = 12.0,
+        max_deflection_rad: float = 0.25,
         timeout: float = 1.0,
     ) -> None:
         self.command(

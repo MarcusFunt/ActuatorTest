@@ -45,18 +45,18 @@
 #define USB_SERIAL_BAUD             1000000UL
 #define MOTOR_FULL_STEPS_PER_REV    200
 #define MOTOR_MICROSTEPS            16
-#define MOTOR_RMS_CURRENT_MA        600
+#define MOTOR_RMS_CURRENT_MA        1000
 #define STEP_PULSE_US               3
-#define MAX_STEP_RATE_SPS           12000.0f
+#define MAX_STEP_RATE_SPS           60000.0f
 #define DEFAULT_BUS_VOLTAGE         24.0f
 #define DEFAULT_TEMPERATURE_C       30.0f
 
 // These match the desktop tool's default safety limits.
-#define MAX_MOVE_RAD                20.0f
-#define MAX_VELOCITY_RAD_S          8.0f
-#define MAX_ACCEL_RAD_S2            200.0f
+#define MAX_MOVE_RAD                60.0f
+#define MAX_VELOCITY_RAD_S          40.0f
+#define MAX_ACCEL_RAD_S2            1000.0f
 
-#define TELEMETRY_HZ                100UL
+#define TELEMETRY_HZ                500UL
 #define ENCODER_UPDATE_PERIOD_US    2000UL
 #define ENCODER_FAILURE_FAULT_COUNT 3
 #define STEP_TIMER_HZ               1000000UL
@@ -64,7 +64,7 @@
 #define PLANNER_PERIOD_US           (1000000UL / PLANNER_HZ)
 #define MAX_PLANNER_CATCHUP_TICKS   5
 #define MIN_STEP_LOW_US             2UL
-#define MIN_STEP_INTERVAL_US        84UL
+#define MIN_STEP_INTERVAL_US        17UL
 #define MAX_SERIAL_BYTES_PER_LOOP   128UL
 
 static const float TWO_PI_F = 6.2831853071795864769f;
@@ -395,11 +395,11 @@ static bool resonanceDeratingEnabled = false;
 static bool chirpActive = false;
 static uint32_t chirpStartUs = 0;
 static float chirpCenterMotorRad = 0.0f;
-static float chirpAmplitudeRad = 0.08f;
-static float chirpStartHz = 0.5f;
-static float chirpEndHz = 20.0f;
-static float chirpDurationS = 20.0f;
-static float chirpMaxDeflectionRad = 0.12f;
+static float chirpAmplitudeRad = 0.18f;
+static float chirpStartHz = 0.8f;
+static float chirpEndHz = 75.0f;
+static float chirpDurationS = 12.0f;
+static float chirpMaxDeflectionRad = 0.25f;
 
 static void loadConfig() {
   preferences.begin("actuator", true);
@@ -1514,8 +1514,8 @@ static void handleStartChirp(const uint8_t *payload, uint16_t len, uint16_t sequ
   }
 
   chirpAmplitudeRad = clampFloat(fabsf(amplitudeRad), 0.001f, 0.5f);
-  chirpStartHz = clampFloat(fabsf(startHz), 0.05f, 45.0f);
-  chirpEndHz = clampFloat(fabsf(endHz), chirpStartHz, 45.0f);
+  chirpStartHz = clampFloat(fabsf(startHz), 0.05f, 75.0f);
+  chirpEndHz = clampFloat(fabsf(endHz), chirpStartHz, 75.0f);
   chirpDurationS = clampFloat(fabsf(durationS), 1.0f, 120.0f);
   chirpMaxDeflectionRad = clampFloat(fabsf(maxDeflectionRad), 0.001f, 1.0f);
   chirpCenterMotorRad = (float)readCurrentStepPosition() * MOTOR_RAD_PER_MICROSTEP;

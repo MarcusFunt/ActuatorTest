@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "actuator-bench-tool"
+version = "0.2.0"
+description = "Actuator calibration and characterization bench tool — Reflex/Bokeh web UI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "reflex>=0.6.0",
+  "bokeh>=3.4.0",
+  "pyserial",
+  "numpy",
+  "scipy",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+actuator-gui = "actuator_tool.app_reflex:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["actuator_tool*", "actuator_gui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

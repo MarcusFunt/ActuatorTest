@@ -34,7 +34,17 @@ def main(argv: list[str] | None = None) -> None:
 
     cmd = [sys.executable, "-m", "reflex", "run"]
     if args.prod:
-        cmd.extend(["--env", "prod"])
+        cmd.extend(
+            [
+                "--env",
+                "prod",
+                "--frontend-port",
+                "3000",
+                "--backend-port",
+                "3000",
+                "--single-port",
+            ]
+        )
 
     env = os.environ.copy()
     if args.sim or not args.port:

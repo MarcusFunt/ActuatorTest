@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -166,17 +167,22 @@ def start_bokeh_server(ctx_obj: Any, port: int = BOKEH_PORT) -> None:
     # Give Tornado its own event loop so it doesn't conflict with Reflex/uvicorn.
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-    server = Server(
-        {"/": Application(FunctionHandler(lambda doc: _make_document(doc, ctx_obj)))},
-        port=port,
-        allow_websocket_origin=[
-            f"localhost:{port}",
-            "localhost:3000",
-            "localhost:8000",
-            "127.0.0.1:3000",
-            "127.0.0.1:8000",
-        ],
-    )
+    try:
+        server = Server(
+            {"/": Application(FunctionHandler(lambda doc: _make_document(doc, ctx_obj)))},
+            port=port,
+            allow_websocket_origin=[
+                f"localhost:{port}",
+                "localhost:3000",
+                "localhost:8000",
+                "127.0.0.1:3000",
+                "127.0.0.1:8000",
+            ],
+        )
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:
+            return
+        raise
     server.start()
     server.io_loop.start()
 

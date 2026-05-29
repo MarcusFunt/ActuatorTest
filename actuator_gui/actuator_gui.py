@@ -307,6 +307,18 @@ def _save_config() -> None:
     c.set_status("Calibration saved to actuator")
 
 
+def _format_fault_flags(value: int) -> str:
+    faults = FaultFlags(value)
+    if faults == FaultFlags.NONE:
+        return "NONE"
+    names = [
+        flag.name
+        for flag in FaultFlags
+        if flag != FaultFlags.NONE and flag in faults
+    ]
+    return " | ".join(names) if names else str(int(faults))
+
+
 # ── Reflex state ──────────────────────────────────────────────────────────────
 
 class State(rx.State):
@@ -405,7 +417,7 @@ class State(rx.State):
         async with self:
             self.busy = True
             self.status = "Connecting…"
-        use_sim, port = self.use_sim, self.port
+            use_sim, port = self.use_sim, self.port
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(_executor, lambda: _connect(use_sim, port))
@@ -443,33 +455,37 @@ class State(rx.State):
 
     # ── Mode / motion ─────────────────────────────────────────────────────
 
+    def _set_status(self, message: str) -> None:
+        _ctx.set_status(message)
+        self.status = message
+
     def mode_disabled(self) -> None:
         try:
             _ctx.require_client().set_mode(ActuatorMode.DISABLED)
-            self.status = "Mode: DISABLED"
+            self._set_status("Mode: DISABLED")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     def mode_calibration(self) -> None:
         try:
             _ctx.require_client().set_mode(ActuatorMode.CALIBRATION)
-            self.status = "Mode: CALIBRATION"
+            self._set_status("Mode: CALIBRATION")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     def do_stop(self) -> None:
         try:
             _ctx.require_client().stop()
-            self.status = "Stop sent"
+            self._set_status("Stop sent")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     def do_estop(self) -> None:
         try:
             _ctx.require_client().estop()
-            self.status = "ESTOP sent"
+            self._set_status("ESTOP sent")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     def jog_pos(self) -> None:
         self._jog(1.0)
@@ -480,41 +496,47 @@ class State(rx.State):
     def _jog(self, sign: float) -> None:
         latest = _ctx.store.latest()
         if latest is None or latest.mode != int(ActuatorMode.CALIBRATION):
-            self.status = "Jog requires CALIBRATION mode"
+            self._set_status("Jog requires CALIBRATION mode")
             return
         try:
-            _ctx.require_client().move_rel(sign * self.jog_step, self.move_velocity, self.move_accel)
+            delta = sign * self.jog_step
+            _ctx.require_client().move_rel(delta, self.move_velocity, self.move_accel)
+            self._set_status(f"Jog {delta:.3f} rad")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     @rx.event(background=True)
     async def do_move_rel(self) -> None:
-        delta, vel, accel = self.move_delta, self.move_velocity, self.move_accel
+        async with self:
+            delta, vel, accel = self.move_delta, self.move_velocity, self.move_accel
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(
                 _executor,
                 lambda: _ctx.require_client().move_rel(delta, vel, accel),
             )
+            message = f"MOVE_REL {delta:.3f} rad"
+            _ctx.set_status(message)
             async with self:
-                self.status = f"MOVE_REL {delta:.3f} rad"
+                self.status = message
         except Exception as exc:
+            _ctx.set_status(str(exc))
             async with self:
                 self.status = str(exc)
 
     def zero_motor(self) -> None:
         try:
             _ctx.require_client().zero_motor_encoder()
-            self.status = "Motor encoder zeroed"
+            self._set_status("Motor encoder zeroed")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     def zero_output(self) -> None:
         try:
             _ctx.require_client().zero_output_encoder()
-            self.status = "Output encoder zeroed"
+            self._set_status("Output encoder zeroed")
         except Exception as exc:
-            self.status = str(exc)
+            self._set_status(str(exc))
 
     # ── Tests (all background) ────────────────────────────────────────────
 
@@ -637,8 +659,7 @@ class State(rx.State):
                     self.hardware = _ctx.info.hardware_revision
                 if latest is not None:
                     self.mode_name = latest.mode_name
-                    faults = FaultFlags(latest.fault_flags)
-                    self.fault_text = "NONE" if faults == FaultFlags.NONE else str(faults)
+                    self.fault_text = _format_fault_flags(latest.fault_flags)
                 self.sample_count = stats.total_samples
                 self.dropped = stats.dropped_samples
 

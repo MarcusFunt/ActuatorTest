@@ -54,7 +54,19 @@ def test_cli_accepts_hardware_port(monkeypatch):
 
     app_reflex.main(["--port", "COM5", "--prod"])
 
-    assert captured["cmd"] == [app_reflex.sys.executable, "-m", "reflex", "run", "--env", "prod"]
+    assert captured["cmd"] == [
+        app_reflex.sys.executable,
+        "-m",
+        "reflex",
+        "run",
+        "--env",
+        "prod",
+        "--frontend-port",
+        "3000",
+        "--backend-port",
+        "3000",
+        "--single-port",
+    ]
     assert captured["cwd"] == app_reflex._PROJECT_ROOT
     assert captured["check"] is True
     assert captured["env"]["ACTUATOR_GUI_USE_SIM"] == "0"

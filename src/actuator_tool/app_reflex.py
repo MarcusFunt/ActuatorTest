@@ -8,12 +8,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Project root is three levels up from this file:  src/actuator_tool/app_reflex.py
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+def _find_project_root() -> Path:
+    """Find the checkout root that contains the Reflex config."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "rxconfig.py").is_file():
+            return parent
+    return Path.cwd()
+
+
+_PROJECT_ROOT = _find_project_root()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Actuator bench tool — Reflex/Bokeh web UI")
+    parser = argparse.ArgumentParser(description="Actuator bench tool - Reflex/Bokeh web UI")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--sim", action="store_true", help="preselect the simulator transport")
     target.add_argument("--port", help="preselect a hardware serial port, e.g. COM3")
@@ -30,7 +37,7 @@ def main(argv: list[str] | None = None) -> None:
         cmd.extend(["--env", "prod"])
 
     env = os.environ.copy()
-    if args.sim:
+    if args.sim or not args.port:
         env["ACTUATOR_GUI_USE_SIM"] = "1"
         env.pop("ACTUATOR_GUI_PORT", None)
     elif args.port:
@@ -40,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Starting Reflex app from {_PROJECT_ROOT}")
     if args.port:
         print(f"Hardware port preselected: {args.port}")
-    elif args.sim:
+    else:
         print("Simulator transport preselected.")
     print("Open http://localhost:3000 in your browser.")
     subprocess.run(cmd, cwd=_PROJECT_ROOT, check=True, env=env)

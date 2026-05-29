@@ -77,8 +77,6 @@ class BackendCtx:
 _ctx = BackendCtx()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="actuator")
 
-# One flag so hot-reload doesn't start duplicate pollers / Bokeh servers.
-_polling_started = False
 _bokeh_started = False
 
 
@@ -626,17 +624,17 @@ class State(rx.State):
 
     @rx.event(background=True)
     async def start_polling(self) -> None:
-        global _polling_started
-        if _polling_started:
-            return
-        _polling_started = True
-
         while True:
             await asyncio.sleep(0.5)
             latest = _ctx.store.latest()
             stats = _ctx.store.stats
             async with self:
                 self.status = _ctx.get_status()
+                self.connected = _ctx.connected
+                if _ctx.connected:
+                    self.actuator_id = _ctx.info.actuator_id
+                    self.firmware = _ctx.info.firmware_version
+                    self.hardware = _ctx.info.hardware_revision
                 if latest is not None:
                     self.mode_name = latest.mode_name
                     faults = FaultFlags(latest.fault_flags)

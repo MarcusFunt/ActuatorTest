@@ -10,6 +10,7 @@ from actuator_tool.actuator_protocol import (
     PacketType,
     ProtocolError,
     TelemetryPayload,
+    pack_autotune_control_payload,
     decode_command_payload,
     decode_frame,
     decode_telemetry_payload,
@@ -19,8 +20,16 @@ from actuator_tool.actuator_protocol import (
     crc16_ccitt,
     pack_chirp_payload,
     pack_move_output_rel_payload,
+    pack_position_target_payload,
+    pack_torque_proxy_target_payload,
+    pack_velocity_target_payload,
+    telemetry_payload_v2_size,
+    unpack_autotune_control_payload,
     unpack_chirp_payload,
     unpack_move_output_rel_payload,
+    unpack_position_target_payload,
+    unpack_torque_proxy_target_payload,
+    unpack_velocity_target_payload,
 )
 from actuator_tool.actuator_serial import ActuatorClient, SimulatedTransport
 from actuator_tool.config_schema import SafetyLimits
@@ -165,6 +174,43 @@ def test_telemetry_payload_round_trip():
     assert abs(decoded.output_rad - payload.output_rad) < 1e-6
 
 
+def test_telemetry_v2_payload_round_trip_keeps_v1_compatible_decode():
+    payload = TelemetryPayload(
+        t_us=123456,
+        seq=42,
+        cmd_pos=1.0,
+        cmd_vel=2.0,
+        motor_enc_raw=100,
+        output_enc_raw=25,
+        motor_rad=1.5,
+        output_rad=0.4,
+        motor_vel_rad_s=3.0,
+        output_vel_rad_s=0.75,
+        driver_current=0.8,
+        bus_voltage=24.0,
+        temperature=31.5,
+        fault_flags=0,
+        mode=1,
+        output_target_rad=0.5,
+        torque_proxy_rad=-0.02,
+        motor_slip_rad=0.01,
+        commanded_current=0.35,
+        control_state=2,
+        telemetry_schema_version=2,
+    )
+
+    encoded = encode_telemetry_payload(payload)
+    decoded = decode_telemetry_payload(encoded)
+
+    assert len(encoded) == telemetry_payload_v2_size()
+    assert decoded.telemetry_schema_version == 2
+    assert decoded.output_target_rad == pytest.approx(0.5)
+    assert decoded.torque_proxy_rad == pytest.approx(-0.02)
+    assert decoded.motor_slip_rad == pytest.approx(0.01)
+    assert decoded.commanded_current == pytest.approx(0.35)
+    assert decoded.control_state == 2
+
+
 def test_chirp_payload_round_trip():
     payload = pack_chirp_payload(0.08, 0.5, 20.0, 10.0, 0.12)
 
@@ -179,3 +225,21 @@ def test_move_output_rel_payload_round_trip():
     decoded = unpack_move_output_rel_payload(payload)
 
     assert decoded == pytest.approx((0.25, 1.2, 10.0))
+
+
+def test_production_control_payload_round_trips():
+    assert CommandID.SET_POSITION_TARGET == 19
+    assert CommandID.SET_VELOCITY_TARGET == 20
+    assert CommandID.SET_TORQUE_PROXY_TARGET == 21
+    assert CommandID.AUTOTUNE_CONTROL == 22
+    assert CommandID.GET_CONTROL_STATUS == 23
+
+    position = pack_position_target_payload(1.25, 2.5, 30.0, relative=True)
+    velocity = pack_velocity_target_payload(-1.5, 20.0)
+    torque = pack_torque_proxy_target_payload(0.03, 4.0, 0.5, 1.2)
+    autotune = pack_autotune_control_payload(3, 0.05, 1.2, 0.3, 0.12)
+
+    assert unpack_position_target_payload(position) == pytest.approx((1.25, 2.5, 30.0, 1))
+    assert unpack_velocity_target_payload(velocity) == pytest.approx((-1.5, 20.0))
+    assert unpack_torque_proxy_target_payload(torque) == pytest.approx((0.03, 4.0, 0.5, 1.2))
+    assert unpack_autotune_control_payload(autotune) == pytest.approx((3, 0.05, 1.2, 0.3, 0.12))

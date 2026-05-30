@@ -103,6 +103,44 @@ firmware exposes `START_CHIRP` and `MOVE_OUTPUT_REL` commands in addition to the
 original `MOVE_REL`; output-encoder PID, backlash feed-forward, and resonance
 derating are configured through the existing JSON config command path.
 
+Production-oriented actuator controls are now exposed through telemetry schema
+version 2 while the host decoder still accepts schema 1 telemetry. The actuator
+can run standalone position, velocity, and belt-stretch torque-proxy targets:
+
+- `SET_POSITION_TARGET` accepts absolute or relative output-space targets.
+- `SET_VELOCITY_TARGET` streams a continuous output velocity target.
+- `SET_TORQUE_PROXY_TARGET` controls deflection in radians, where deflection is
+  measured output minus ratio-predicted output from the motor encoder.
+- `AUTOTUNE_CONTROL` starts the on-device velocity/position tuning state
+  machine and writes successful gains to RAM. Use `SAVE_CONFIG` to persist them.
+- `GET_CONTROL_STATUS` returns JSON with active targets, deflection, motor slip,
+  commanded current, autotune state, and the last control fault.
+
+The firmware also includes small-slip encoder correction, large-slip faulting,
+persistent backlash direction compensation, and TMC2209 RMS-current scheduling
+that drops to hold current after motion/load settles.
+
+### Hardware smoke checklist
+
+After flashing production-control firmware, run this sequence before applying
+load:
+
+1. Connect with the GUI or Python client, confirm `INFO` reports telemetry schema
+   version `2`, and run `SELF_TEST`.
+2. Enable telemetry and verify both encoders move in the expected directions.
+3. In `POSITION` mode, send a small relative `SET_POSITION_TARGET`; confirm
+   output position converges, commanded current rises during motion, then drops
+   to hold current.
+4. Stall lightly by hand for less than the missed-step fault threshold; confirm
+   `motor_slip_rad` appears in `GET_CONTROL_STATUS` and recovers.
+5. Exceed the configured missed-step fault threshold at low speed; confirm the
+   actuator faults and disables motion.
+6. In `TORQUE_PROXY` mode, command a small deflection target with conservative
+   velocity/excursion limits; confirm the motor moves in the sign that increases
+   the requested belt-stretch proxy and aborts on timeout/excursion.
+7. Run `AUTOTUNE_CONTROL` with low amplitude and a generous deflection limit;
+   confirm it reports success before saving the resulting gains.
+
 ## Binary protocol
 
 Frames use a fixed little-endian envelope:

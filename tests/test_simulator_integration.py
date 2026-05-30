@@ -4,7 +4,7 @@ import time
 import pytest
 
 from actuator_tool.actuator_data import TelemetryStore
-from actuator_tool.actuator_protocol import ActuatorMode, CommandID, ResponseStatus
+from actuator_tool.actuator_protocol import ActuatorMode, CommandID, FaultFlags, ResponseStatus
 from actuator_tool.actuator_serial import ActuatorClient, ActuatorCommandError, CommandResponse, SimulatedTransport
 from actuator_tool.actuator_tests import run_ratio_calibration, run_resonance_test
 from actuator_tool.config_schema import SafetyLimits
@@ -17,6 +17,16 @@ def wait_for_samples(store: TelemetryStore, count: int, timeout_s: float = 2.0):
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {count} samples")
+
+
+def wait_for(predicate, timeout_s: float = 2.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting for condition")
 
 
 def test_resonance_defaults_are_aggressive():
@@ -296,5 +306,155 @@ def test_resonance_derating_slows_output_space_moves():
         assert unbounded > 12.0
         assert derated < unbounded * 0.75
         assert derated == pytest.approx(8.0, abs=1.0)
+    finally:
+        client.disconnect()
+
+
+def test_position_target_supports_absolute_and_relative_output_targets():
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(sample_hz=150.0), store)
+    client.connect()
+    try:
+        client.set_mode(ActuatorMode.POSITION)
+        client.start_stream()
+        client.set_position_target(0.20, 2.0, 20.0)
+        sample = wait_for(
+            lambda: store.latest() if store.latest() and abs(store.latest().output_rad - 0.20) < 0.04 else None,
+            timeout_s=2.0,
+        )
+        assert sample.output_target_rad == pytest.approx(0.20, abs=0.05)
+
+        client.set_position_target(0.10, 2.0, 20.0, relative=True)
+        sample = wait_for(
+            lambda: store.latest() if store.latest() and abs(store.latest().output_rad - 0.30) < 0.05 else None,
+            timeout_s=2.0,
+        )
+        assert sample.mode == int(ActuatorMode.POSITION)
+    finally:
+        client.disconnect()
+
+
+def test_velocity_target_streams_output_velocity_then_holds_zero():
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(sample_hz=150.0), store)
+    client.connect()
+    try:
+        client.set_mode(ActuatorMode.VELOCITY)
+        client.start_stream()
+        client.set_velocity_target(1.0, 25.0)
+        moving = wait_for(
+            lambda: store.latest() if store.latest() and store.latest().output_vel_rad_s > 0.3 else None,
+            timeout_s=1.5,
+        )
+        assert moving.mode == int(ActuatorMode.VELOCITY)
+
+        client.set_velocity_target(0.0, 25.0)
+        stopped = wait_for(
+            lambda: store.latest()
+            if store.latest()
+            and abs(store.latest().motor_vel_rad_s) < 0.05
+            and abs(store.latest().output_vel_rad_s) < 0.25
+            else None,
+            timeout_s=1.5,
+        )
+        assert stopped.output_vel_rad_s == pytest.approx(0.0, abs=0.25)
+    finally:
+        client.disconnect()
+
+
+def test_torque_proxy_target_uses_deflection_sign_and_reports_status():
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(sample_hz=200.0), store)
+    client.connect()
+    try:
+        client.set_mode(ActuatorMode.TORQUE_PROXY)
+        client.start_stream()
+        client.set_torque_proxy_target(0.04, 2.0, 2.0, 1.0)
+        sample = wait_for(
+            lambda: store.latest() if store.latest() and store.latest().motor_vel_rad_s < -0.02 else None,
+            timeout_s=1.0,
+        )
+        status = client.get_control_status()
+
+        assert sample.mode == int(ActuatorMode.TORQUE_PROXY)
+        assert status["torque_proxy_target_rad"] == pytest.approx(0.04)
+        assert status["last_control_fault"] == ""
+    finally:
+        client.disconnect()
+
+
+def test_missed_step_correction_and_fault_thresholds():
+    transport = SimulatedTransport(sample_hz=200.0)
+    store = TelemetryStore()
+    client = ActuatorClient(transport, store)
+    client.connect()
+    try:
+        client.set_config("missed_step_warn_motor_rad", 0.02)
+        client.set_config("missed_step_fault_motor_rad", 0.20)
+        client.set_mode(ActuatorMode.POSITION)
+        client.start_stream()
+        client.set_position_target(0.20, 2.0, 20.0)
+        wait_for_samples(store, 5)
+
+        transport.inject_motor_slip(0.08)
+        status = wait_for(
+            lambda: client.get_control_status()
+            if abs(client.get_control_status()["motor_slip_rad"]) < 0.08
+            else None,
+            timeout_s=1.0,
+        )
+        assert abs(status["motor_slip_rad"]) < 0.08
+        assert status["fault_flags"] == 0
+
+        transport.inject_motor_slip(0.5)
+        wait_for(lambda: client.faults() & int(FaultFlags.MISSED_STEP), timeout_s=1.0)
+        assert client.faults() & int(FaultFlags.MISSED_STEP)
+    finally:
+        client.disconnect()
+
+
+def test_current_scheduler_downshifts_after_motion():
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(sample_hz=200.0), store)
+    client.connect()
+    try:
+        client.set_config("current_downshift_delay_s", 0.05)
+        client.set_config("hold_current_ma", 250)
+        client.set_mode(ActuatorMode.POSITION)
+        client.start_stream()
+        client.set_position_target(0.05, 1.0, 20.0)
+        run_current = wait_for(
+            lambda: store.latest() if store.latest() and store.latest().commanded_current >= 0.9 else None,
+            timeout_s=1.0,
+        )
+        assert run_current.commanded_current == pytest.approx(1.0, abs=0.01)
+
+        held = wait_for(
+            lambda: store.latest() if store.latest() and store.latest().commanded_current <= 0.3 else None,
+            timeout_s=2.0,
+        )
+        assert held.commanded_current == pytest.approx(0.25, abs=0.05)
+    finally:
+        client.disconnect()
+
+
+def test_autotune_updates_gains_in_ram_and_reports_success():
+    client = ActuatorClient(SimulatedTransport(sample_hz=200.0))
+    client.connect()
+    try:
+        client.set_mode(ActuatorMode.POSITION)
+        client.autotune_control(3, 0.05, 1.2, 0.05, 1.0)
+        status = wait_for(
+            lambda: client.get_control_status()
+            if client.get_control_status()["autotune_state"] == 2
+            else None,
+            timeout_s=1.0,
+        )
+        config = client.get_config()
+
+        assert status["autotune_state"] == 2
+        assert config["pid_enabled"] is True
+        assert config["pid_kp"] > 0
+        assert config["velocity_pid_kp"] > 0
     finally:
         client.disconnect()

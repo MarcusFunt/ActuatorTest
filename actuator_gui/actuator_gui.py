@@ -190,6 +190,44 @@ def _sync_calibration_from_config(ctx: BackendCtx, cfg: dict[str, Any]) -> None:
         cal.pid_i_limit_motor_rad = float(cfg.get("pid_i_limit_motor_rad") or 0.05)
     if "pid_output_limit_motor_rad" in cfg:
         cal.pid_output_limit_motor_rad = float(cfg.get("pid_output_limit_motor_rad") or 0.25)
+    if "velocity_pid_kp" in cfg:
+        cal.velocity_pid_kp = float(cfg.get("velocity_pid_kp") or 0.2)
+    if "velocity_pid_ki" in cfg:
+        cal.velocity_pid_ki = float(cfg.get("velocity_pid_ki") or 2.0)
+    if "velocity_pid_i_limit_motor_rad" in cfg:
+        cal.velocity_pid_i_limit_motor_rad = float(cfg.get("velocity_pid_i_limit_motor_rad") or 0.2)
+    if "torque_proxy_kp" in cfg:
+        cal.torque_proxy_kp = float(cfg.get("torque_proxy_kp") or 3.0)
+    if "torque_proxy_limit_rad" in cfg:
+        cal.torque_proxy_limit_rad = float(cfg.get("torque_proxy_limit_rad") or 0.12)
+    if "torque_proxy_max_motor_velocity_rad_s" in cfg:
+        cal.torque_proxy_max_motor_velocity_rad_s = float(cfg.get("torque_proxy_max_motor_velocity_rad_s") or 4.0)
+    if "torque_proxy_timeout_s" in cfg:
+        cal.torque_proxy_timeout_s = float(cfg.get("torque_proxy_timeout_s") or 3.0)
+    if "missed_step_correction_enabled" in cfg:
+        cal.missed_step_correction_enabled = bool(cfg.get("missed_step_correction_enabled"))
+    if "missed_step_warn_motor_rad" in cfg:
+        cal.missed_step_warn_motor_rad = float(cfg.get("missed_step_warn_motor_rad") or 0.05)
+    if "missed_step_fault_motor_rad" in cfg:
+        cal.missed_step_fault_motor_rad = float(cfg.get("missed_step_fault_motor_rad") or 0.25)
+    if "missed_step_correction_rate" in cfg:
+        cal.missed_step_correction_rate = float(cfg.get("missed_step_correction_rate") or 0.25)
+    if "current_control_enabled" in cfg:
+        cal.current_control_enabled = bool(cfg.get("current_control_enabled"))
+    if "idle_current_ma" in cfg:
+        cal.idle_current_ma = int(cfg.get("idle_current_ma") or 0)
+    if "hold_current_ma" in cfg:
+        cal.hold_current_ma = int(cfg.get("hold_current_ma") or 350)
+    if "run_current_ma" in cfg:
+        cal.run_current_ma = int(cfg.get("run_current_ma") or 1000)
+    if "current_downshift_delay_s" in cfg:
+        cal.current_downshift_delay_s = float(cfg.get("current_downshift_delay_s") or 0.5)
+    if "autotune_max_amplitude_rad" in cfg:
+        cal.autotune_max_amplitude_rad = float(cfg.get("autotune_max_amplitude_rad") or 0.4)
+    if "autotune_max_duration_s" in cfg:
+        cal.autotune_max_duration_s = float(cfg.get("autotune_max_duration_s") or 15.0)
+    if "autotune_max_deflection_rad" in cfg:
+        cal.autotune_max_deflection_rad = float(cfg.get("autotune_max_deflection_rad") or 0.25)
     if "backlash_motor_rad" in cfg:
         cal.backlash_motor_rad = float(cfg.get("backlash_motor_rad") or 0.0)
     if "backlash_comp_enabled" in cfg:
@@ -259,6 +297,25 @@ def _apply_ui_config(
             ("pid_kd", cal.pid_kd),
             ("pid_i_limit_motor_rad", cal.pid_i_limit_motor_rad),
             ("pid_output_limit_motor_rad", cal.pid_output_limit_motor_rad),
+            ("velocity_pid_kp", cal.velocity_pid_kp),
+            ("velocity_pid_ki", cal.velocity_pid_ki),
+            ("velocity_pid_i_limit_motor_rad", cal.velocity_pid_i_limit_motor_rad),
+            ("torque_proxy_kp", cal.torque_proxy_kp),
+            ("torque_proxy_limit_rad", cal.torque_proxy_limit_rad),
+            ("torque_proxy_max_motor_velocity_rad_s", cal.torque_proxy_max_motor_velocity_rad_s),
+            ("torque_proxy_timeout_s", cal.torque_proxy_timeout_s),
+            ("missed_step_correction_enabled", cal.missed_step_correction_enabled),
+            ("missed_step_warn_motor_rad", cal.missed_step_warn_motor_rad),
+            ("missed_step_fault_motor_rad", cal.missed_step_fault_motor_rad),
+            ("missed_step_correction_rate", cal.missed_step_correction_rate),
+            ("current_control_enabled", cal.current_control_enabled),
+            ("idle_current_ma", cal.idle_current_ma),
+            ("hold_current_ma", cal.hold_current_ma),
+            ("run_current_ma", cal.run_current_ma),
+            ("current_downshift_delay_s", cal.current_downshift_delay_s),
+            ("autotune_max_amplitude_rad", cal.autotune_max_amplitude_rad),
+            ("autotune_max_duration_s", cal.autotune_max_duration_s),
+            ("autotune_max_deflection_rad", cal.autotune_max_deflection_rad),
             ("backlash_motor_rad", cal.backlash_motor_rad),
             ("backlash_comp_enabled", cal.backlash_comp_enabled),
             ("resonance_frequency_hz", cal.resonance_frequency_hz),
@@ -480,6 +537,25 @@ def _save_config() -> None:
         ("pid_kd", cal.pid_kd),
         ("pid_i_limit_motor_rad", cal.pid_i_limit_motor_rad),
         ("pid_output_limit_motor_rad", cal.pid_output_limit_motor_rad),
+        ("velocity_pid_kp", cal.velocity_pid_kp),
+        ("velocity_pid_ki", cal.velocity_pid_ki),
+        ("velocity_pid_i_limit_motor_rad", cal.velocity_pid_i_limit_motor_rad),
+        ("torque_proxy_kp", cal.torque_proxy_kp),
+        ("torque_proxy_limit_rad", cal.torque_proxy_limit_rad),
+        ("torque_proxy_max_motor_velocity_rad_s", cal.torque_proxy_max_motor_velocity_rad_s),
+        ("torque_proxy_timeout_s", cal.torque_proxy_timeout_s),
+        ("missed_step_correction_enabled", cal.missed_step_correction_enabled),
+        ("missed_step_warn_motor_rad", cal.missed_step_warn_motor_rad),
+        ("missed_step_fault_motor_rad", cal.missed_step_fault_motor_rad),
+        ("missed_step_correction_rate", cal.missed_step_correction_rate),
+        ("current_control_enabled", cal.current_control_enabled),
+        ("idle_current_ma", cal.idle_current_ma),
+        ("hold_current_ma", cal.hold_current_ma),
+        ("run_current_ma", cal.run_current_ma),
+        ("current_downshift_delay_s", cal.current_downshift_delay_s),
+        ("autotune_max_amplitude_rad", cal.autotune_max_amplitude_rad),
+        ("autotune_max_duration_s", cal.autotune_max_duration_s),
+        ("autotune_max_deflection_rad", cal.autotune_max_deflection_rad),
         ("backlash_motor_rad", cal.backlash_motor_rad),
         ("backlash_comp_enabled", cal.backlash_comp_enabled),
         ("resonance_frequency_hz", cal.resonance_frequency_hz),

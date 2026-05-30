@@ -105,6 +105,11 @@ enum CommandID : uint8_t {
   CMD_SELF_TEST = 16,
   CMD_START_CHIRP = 17,
   CMD_MOVE_OUTPUT_REL = 18,
+  CMD_SET_POSITION_TARGET = 19,
+  CMD_SET_VELOCITY_TARGET = 20,
+  CMD_SET_TORQUE_PROXY_TARGET = 21,
+  CMD_AUTOTUNE_CONTROL = 22,
+  CMD_GET_CONTROL_STATUS = 23,
 };
 
 enum ResponseStatus : uint8_t {
@@ -123,6 +128,7 @@ enum ActuatorMode : uint8_t {
   MODE_OPEN_LOOP = 2,
   MODE_POSITION = 3,
   MODE_VELOCITY = 4,
+  MODE_TORQUE_PROXY = 5,
   MODE_FAULT = 255,
 };
 
@@ -135,6 +141,22 @@ enum FaultFlags : uint32_t {
   FAULT_OVER_TEMPERATURE = 1UL << 4,
   FAULT_ESTOP_ACTIVE = 1UL << 5,
   FAULT_PROTOCOL_ERROR = 1UL << 6,
+  FAULT_MISSED_STEP = 1UL << 7,
+  FAULT_CONTROL_ERROR = 1UL << 8,
+  FAULT_AUTOTUNE_FAILED = 1UL << 9,
+};
+
+enum ControlState : uint8_t {
+  CONTROL_IDLE = 0,
+  CONTROL_AUTOTUNE_RUNNING = 1,
+  CONTROL_AUTOTUNE_SUCCESS = 2,
+  CONTROL_AUTOTUNE_FAILED = 3,
+};
+
+enum AutotuneLoop : uint8_t {
+  AUTOTUNE_VELOCITY = 1,
+  AUTOTUNE_POSITION = 2,
+  AUTOTUNE_BOTH = 3,
 };
 
 // -- Small bit-banged I2C bus for the second AS5600 ---------------------------
@@ -384,13 +406,57 @@ static float pidIntegral = 0.0f;
 static float pidLastError = 0.0f;
 static float pidLastMeasurement = 0.0f;
 static float pidFilteredDerivative = 0.0f;
+static float velocityPidKp = 0.2f;
+static float velocityPidKi = 2.0f;
+static float velocityPidILimitMotorRad = 0.2f;
+static float velocityPidIntegral = 0.0f;
 static bool positionTargetValid = false;
 static float positionTargetOutputRad = 0.0f;
+static float velocityTargetOutputRadS = 0.0f;
 static int8_t lastPositionDirection = 0;
+static int8_t backlashDirection = 0;
+static float backlashOffsetMotorRad = 0.0f;
 static float backlashMotorRad = 0.0f;
 static bool backlashCompEnabled = false;
 static float resonanceFrequencyHz = 0.0f;
 static bool resonanceDeratingEnabled = false;
+
+static float torqueProxyKp = 3.0f;
+static float torqueProxyLimitRad = 0.12f;
+static float torqueProxyTargetRad = 0.0f;
+static float torqueProxyMaxMotorVelocityRadS = 4.0f;
+static float torqueProxyCommandMaxVelocityRadS = 4.0f;
+static float torqueProxyMaxExcursionRad = 0.5f;
+static float torqueProxyStartMotorRad = 0.0f;
+static uint32_t torqueProxyStartUs = 0;
+static uint32_t torqueProxyTimeoutUs = 3000000UL;
+
+static bool missedStepCorrectionEnabled = true;
+static float missedStepWarnMotorRad = 0.05f;
+static float missedStepFaultMotorRad = 0.25f;
+static float missedStepCorrectionRate = 0.25f;
+static float motorSlipRad = 0.0f;
+
+static bool currentControlEnabled = true;
+static uint16_t idleCurrentMa = 0;
+static uint16_t holdCurrentMa = 350;
+static uint16_t runCurrentMa = MOTOR_RMS_CURRENT_MA;
+static uint16_t commandedCurrentMa = 0;
+static uint16_t appliedCurrentMa = 0;
+static float currentDownshiftDelayS = 0.5f;
+static uint32_t lastHighCurrentDemandUs = 0;
+
+static uint8_t controlState = CONTROL_IDLE;
+static uint8_t autotuneLoopSelector = 0;
+static float autotuneMaxAmplitudeRad = 0.4f;
+static float autotuneMaxDurationS = 15.0f;
+static float autotuneMaxDeflectionRad = 0.25f;
+static float autotuneAmplitudeRad = 0.0f;
+static float autotuneMaxVelocityRadS = 0.0f;
+static float autotuneActiveMaxDeflectionRad = 0.25f;
+static uint32_t autotuneStartUs = 0;
+static uint32_t autotuneDurationUs = 0;
+static char lastControlFault[32] = "";
 
 static bool chirpActive = false;
 static uint32_t chirpStartUs = 0;
@@ -400,6 +466,13 @@ static float chirpStartHz = 0.8f;
 static float chirpEndHz = 75.0f;
 static float chirpDurationS = 12.0f;
 static float chirpMaxDeflectionRad = 0.25f;
+
+static float clampFloat(float value, float lo, float hi);
+static float sanitizeNonNegativeFloat(float value, float fallback);
+static float sanitizePidGain(float value);
+static float sanitizePidLimit(float value, float fallback);
+static void stopMotion();
+static void setMode(ActuatorMode nextMode);
 
 static void loadConfig() {
   preferences.begin("actuator", true);
@@ -411,6 +484,25 @@ static void loadConfig() {
   pidKd = preferences.getFloat("pid_kd", 0.0f);
   pidILimitMotorRad = preferences.getFloat("pid_i_lim", 0.05f);
   pidOutputLimitMotorRad = preferences.getFloat("pid_o_lim", 0.25f);
+  velocityPidKp = preferences.getFloat("vel_kp", 0.2f);
+  velocityPidKi = preferences.getFloat("vel_ki", 2.0f);
+  velocityPidILimitMotorRad = preferences.getFloat("vel_i_lim", 0.2f);
+  torqueProxyKp = preferences.getFloat("tq_kp", 3.0f);
+  torqueProxyLimitRad = preferences.getFloat("tq_lim", 0.12f);
+  torqueProxyMaxMotorVelocityRadS = preferences.getFloat("tq_vel", 4.0f);
+  torqueProxyTimeoutUs = (uint32_t)(preferences.getFloat("tq_timeout", 3.0f) * 1000000.0f);
+  missedStepCorrectionEnabled = preferences.getBool("slip_en", true);
+  missedStepWarnMotorRad = preferences.getFloat("slip_warn", 0.05f);
+  missedStepFaultMotorRad = preferences.getFloat("slip_fault", 0.25f);
+  missedStepCorrectionRate = preferences.getFloat("slip_rate", 0.25f);
+  currentControlEnabled = preferences.getBool("cur_en", true);
+  idleCurrentMa = (uint16_t)preferences.getUInt("cur_idle", 0);
+  holdCurrentMa = (uint16_t)preferences.getUInt("cur_hold", 350);
+  runCurrentMa = (uint16_t)preferences.getUInt("cur_run", MOTOR_RMS_CURRENT_MA);
+  currentDownshiftDelayS = preferences.getFloat("cur_delay", 0.5f);
+  autotuneMaxAmplitudeRad = preferences.getFloat("at_amp", 0.4f);
+  autotuneMaxDurationS = preferences.getFloat("at_dur", 15.0f);
+  autotuneMaxDeflectionRad = preferences.getFloat("at_defl", 0.25f);
   backlashMotorRad = preferences.getFloat("backlash_m", 0.0f);
   backlashCompEnabled = preferences.getBool("backlash_en", false);
   resonanceFrequencyHz = preferences.getFloat("res_hz", 0.0f);
@@ -443,6 +535,32 @@ static void loadConfig() {
   if (pidOutputLimitMotorRad > 10.0f) {
     pidOutputLimitMotorRad = 10.0f;
   }
+  velocityPidKp = sanitizePidGain(velocityPidKp);
+  velocityPidKi = sanitizePidGain(velocityPidKi);
+  velocityPidILimitMotorRad = sanitizePidLimit(velocityPidILimitMotorRad, 0.2f);
+  torqueProxyKp = sanitizePidGain(torqueProxyKp);
+  torqueProxyLimitRad = clampFloat(sanitizeNonNegativeFloat(torqueProxyLimitRad, 0.12f), 0.001f, 10.0f);
+  torqueProxyMaxMotorVelocityRadS =
+      clampFloat(sanitizeNonNegativeFloat(torqueProxyMaxMotorVelocityRadS, 4.0f), 0.01f, MAX_VELOCITY_RAD_S);
+  if (torqueProxyTimeoutUs < 50000UL) {
+    torqueProxyTimeoutUs = 3000000UL;
+  }
+  missedStepWarnMotorRad = clampFloat(sanitizeNonNegativeFloat(missedStepWarnMotorRad, 0.05f), 0.0f, 10.0f);
+  missedStepFaultMotorRad = clampFloat(sanitizeNonNegativeFloat(missedStepFaultMotorRad, 0.25f), 0.001f, 10.0f);
+  if (missedStepWarnMotorRad > missedStepFaultMotorRad) {
+    missedStepWarnMotorRad = missedStepFaultMotorRad;
+  }
+  missedStepCorrectionRate = clampFloat(sanitizeNonNegativeFloat(missedStepCorrectionRate, 0.25f), 0.0f, 1.0f);
+  if (holdCurrentMa > runCurrentMa) {
+    holdCurrentMa = runCurrentMa;
+  }
+  if (runCurrentMa == 0) {
+    runCurrentMa = MOTOR_RMS_CURRENT_MA;
+  }
+  currentDownshiftDelayS = clampFloat(sanitizeNonNegativeFloat(currentDownshiftDelayS, 0.5f), 0.0f, 30.0f);
+  autotuneMaxAmplitudeRad = clampFloat(sanitizeNonNegativeFloat(autotuneMaxAmplitudeRad, 0.4f), 0.001f, 10.0f);
+  autotuneMaxDurationS = clampFloat(sanitizeNonNegativeFloat(autotuneMaxDurationS, 15.0f), 0.05f, 120.0f);
+  autotuneMaxDeflectionRad = clampFloat(sanitizeNonNegativeFloat(autotuneMaxDeflectionRad, 0.25f), 0.001f, 10.0f);
   if (!isfinite(backlashMotorRad) || backlashMotorRad < 0.0f) {
     backlashMotorRad = 0.0f;
   }
@@ -465,6 +583,25 @@ static bool saveConfig() {
   ok = preferences.putFloat("pid_kd", pidKd) > 0 && ok;
   ok = preferences.putFloat("pid_i_lim", pidILimitMotorRad) > 0 && ok;
   ok = preferences.putFloat("pid_o_lim", pidOutputLimitMotorRad) > 0 && ok;
+  ok = preferences.putFloat("vel_kp", velocityPidKp) > 0 && ok;
+  ok = preferences.putFloat("vel_ki", velocityPidKi) > 0 && ok;
+  ok = preferences.putFloat("vel_i_lim", velocityPidILimitMotorRad) > 0 && ok;
+  ok = preferences.putFloat("tq_kp", torqueProxyKp) > 0 && ok;
+  ok = preferences.putFloat("tq_lim", torqueProxyLimitRad) > 0 && ok;
+  ok = preferences.putFloat("tq_vel", torqueProxyMaxMotorVelocityRadS) > 0 && ok;
+  ok = preferences.putFloat("tq_timeout", (float)torqueProxyTimeoutUs * 1.0e-6f) > 0 && ok;
+  ok = preferences.putBool("slip_en", missedStepCorrectionEnabled) > 0 && ok;
+  ok = preferences.putFloat("slip_warn", missedStepWarnMotorRad) > 0 && ok;
+  ok = preferences.putFloat("slip_fault", missedStepFaultMotorRad) > 0 && ok;
+  ok = preferences.putFloat("slip_rate", missedStepCorrectionRate) > 0 && ok;
+  ok = preferences.putBool("cur_en", currentControlEnabled) > 0 && ok;
+  ok = preferences.putUInt("cur_idle", idleCurrentMa) > 0 && ok;
+  ok = preferences.putUInt("cur_hold", holdCurrentMa) > 0 && ok;
+  ok = preferences.putUInt("cur_run", runCurrentMa) > 0 && ok;
+  ok = preferences.putFloat("cur_delay", currentDownshiftDelayS) > 0 && ok;
+  ok = preferences.putFloat("at_amp", autotuneMaxAmplitudeRad) > 0 && ok;
+  ok = preferences.putFloat("at_dur", autotuneMaxDurationS) > 0 && ok;
+  ok = preferences.putFloat("at_defl", autotuneMaxDeflectionRad) > 0 && ok;
   ok = preferences.putFloat("backlash_m", backlashMotorRad) > 0 && ok;
   ok = preferences.putBool("backlash_en", backlashCompEnabled) > 0 && ok;
   ok = preferences.putFloat("res_hz", resonanceFrequencyHz) > 0 && ok;
@@ -552,6 +689,12 @@ static int64_t readCurrentStepPosition() {
   return value;
 }
 
+static void setCurrentStepPosition(int64_t value) {
+  portENTER_CRITICAL(&motionMux);
+  currentStepPosition = value;
+  portEXIT_CRITICAL(&motionMux);
+}
+
 static int64_t readTargetStepPosition() {
   portENTER_CRITICAL(&motionMux);
   const int64_t value = targetStepPosition;
@@ -575,6 +718,7 @@ static void resetPidState() {
   pidLastError = 0.0f;
   pidLastMeasurement = outputEncoder.rad;
   pidFilteredDerivative = 0.0f;
+  velocityPidIntegral = 0.0f;
 }
 
 static float sanitizeNonNegativeFloat(float value, float fallback) {
@@ -681,6 +825,8 @@ static void resetStepPositions() {
   portEXIT_CRITICAL(&motionMux);
   baseTargetStepPosition = 0;
   positionTargetValid = false;
+  velocityTargetOutputRadS = 0.0f;
+  torqueProxyTargetRad = torqueProxyRad();
   chirpActive = false;
   resetPidState();
 }
@@ -695,9 +841,76 @@ static float clampFloat(float value, float lo, float hi) {
   return value;
 }
 
+static float predictedOutputRad() {
+  return outputPerMotor * motorEncoder.rad + outputOffsetRad;
+}
+
+static float torqueProxyRad() {
+  return outputEncoder.rad - predictedOutputRad();
+}
+
+static float outputTargetToMotorRad(float outputTargetRad) {
+  if (fabsf(outputPerMotor) < 1.0e-9f) {
+    return (float)readCurrentStepPosition() * MOTOR_RAD_PER_MICROSTEP;
+  }
+  return (outputTargetRad - outputOffsetRad) / outputPerMotor + backlashOffsetMotorRad;
+}
+
+static void setLastControlFault(const char *message) {
+  if (message == nullptr) {
+    lastControlFault[0] = '\0';
+    return;
+  }
+  strncpy(lastControlFault, message, sizeof(lastControlFault) - 1);
+  lastControlFault[sizeof(lastControlFault) - 1] = '\0';
+}
+
+static void setFaultAndStop(uint32_t fault, const char *message) {
+  faultFlags |= fault;
+  setLastControlFault(message);
+  stopMotion();
+  setMode(MODE_FAULT);
+}
+
+static void applyDriverCurrent(uint16_t currentMa) {
+  if (currentMa == appliedCurrentMa) {
+    commandedCurrentMa = currentMa;
+    return;
+  }
+  commandedCurrentMa = currentMa;
+  appliedCurrentMa = currentMa;
+  if (tmcUartOk && currentMa > 0) {
+    driver.rms_current(currentMa);
+  }
+}
+
+static void serviceCurrentControl(uint32_t nowUs) {
+  if (!driverEnabled || mode == MODE_DISABLED || mode == MODE_FAULT || faultFlags != FAULT_NONE) {
+    applyDriverCurrent(0);
+    return;
+  }
+  uint16_t targetMa = runCurrentMa;
+  if (currentControlEnabled) {
+    const bool moving = fabsf(currentSpeedSps) > 0.5f || abs64(readTargetStepPosition() - readCurrentStepPosition()) > 1;
+    const bool highDeflection = fabsf(torqueProxyRad()) > torqueProxyLimitRad * 0.5f;
+    if (moving || highDeflection || controlState == CONTROL_AUTOTUNE_RUNNING) {
+      lastHighCurrentDemandUs = nowUs;
+      targetMa = runCurrentMa;
+    } else {
+      const uint32_t delayUs = (uint32_t)(currentDownshiftDelayS * 1000000.0f);
+      targetMa = ((uint32_t)(nowUs - lastHighCurrentDemandUs) >= delayUs) ? holdCurrentMa : runCurrentMa;
+    }
+  }
+  applyDriverCurrent(targetMa);
+}
+
 static void enableDriver(bool enable) {
   if (!enable) {
     stopStepScheduler(true);
+    applyDriverCurrent(0);
+  } else if (commandedCurrentMa == 0) {
+    applyDriverCurrent(runCurrentMa);
+    lastHighCurrentDemandUs = micros();
   }
   portENTER_CRITICAL(&motionMux);
   driverEnabled = enable;
@@ -714,6 +927,8 @@ static void stopMotion() {
   baseTargetStepPosition = current;
   chirpActive = false;
   positionTargetValid = false;
+  velocityTargetOutputRadS = 0.0f;
+  torqueProxyTargetRad = torqueProxyRad();
   resetPidState();
   currentSpeedSps = 0.0f;
 }
@@ -845,7 +1060,9 @@ static void configureTmc2209() {
   driver.mstep_reg_select(true);
   driver.toff(5);
   driver.blank_time(24);
-  driver.rms_current(MOTOR_RMS_CURRENT_MA);
+  driver.rms_current(runCurrentMa);
+  appliedCurrentMa = runCurrentMa;
+  commandedCurrentMa = runCurrentMa;
   driver.microsteps(MOTOR_MICROSTEPS);
   driver.en_spreadCycle(false);
   driver.pwm_autoscale(true);
@@ -898,7 +1115,11 @@ static void configureStepTimer() {
 }
 
 static bool modeAllowsMotion() {
-  return mode == MODE_CALIBRATION || mode == MODE_OPEN_LOOP || mode == MODE_POSITION;
+  return mode == MODE_CALIBRATION ||
+         mode == MODE_OPEN_LOOP ||
+         mode == MODE_POSITION ||
+         mode == MODE_VELOCITY ||
+         mode == MODE_TORQUE_PROXY;
 }
 
 static void setMode(ActuatorMode nextMode) {
@@ -924,13 +1145,78 @@ static void setMode(ActuatorMode nextMode) {
   if (mode != nextMode) {
     chirpActive = false;
     positionTargetValid = false;
+    velocityTargetOutputRadS = 0.0f;
     resetPidState();
+  }
+  if (nextMode == MODE_TORQUE_PROXY) {
+    torqueProxyTargetRad = torqueProxyRad();
+    torqueProxyStartMotorRad = motorEncoder.rad;
+    torqueProxyStartUs = micros();
+    torqueProxyCommandMaxVelocityRadS = torqueProxyMaxMotorVelocityRadS;
+    torqueProxyMaxExcursionRad = 1000000.0f;
   }
   mode = nextMode;
   enableDriver(modeAllowsMotion());
 }
 
+static void serviceMissedStepCorrection() {
+  if (!motorEncoder.ok || !missedStepCorrectionEnabled || faultFlags != FAULT_NONE) {
+    return;
+  }
+  const int64_t issuedSteps = readCurrentStepPosition();
+  const float issuedMotorRad = (float)issuedSteps * MOTOR_RAD_PER_MICROSTEP;
+  motorSlipRad = issuedMotorRad - motorEncoder.rad;
+  if (fabsf(motorSlipRad) >= missedStepFaultMotorRad) {
+    setFaultAndStop(FAULT_MISSED_STEP, "MISSED_STEP");
+    return;
+  }
+  if (fabsf(motorSlipRad) >= missedStepWarnMotorRad && missedStepCorrectionRate > 0.0f) {
+    const int64_t correctionSteps = (int64_t)roundf(
+        (motorSlipRad * missedStepCorrectionRate) / MOTOR_RAD_PER_MICROSTEP);
+    if (correctionSteps != 0) {
+      setCurrentStepPosition(issuedSteps - correctionSteps);
+    }
+  }
+}
+
+static void serviceAutotune(uint32_t nowUs) {
+  if (controlState != CONTROL_AUTOTUNE_RUNNING) {
+    return;
+  }
+  if (fabsf(torqueProxyRad()) > autotuneActiveMaxDeflectionRad) {
+    controlState = CONTROL_AUTOTUNE_FAILED;
+    setFaultAndStop(FAULT_AUTOTUNE_FAILED, "AUTOTUNE_DEFLECTION");
+    return;
+  }
+  if ((uint32_t)(nowUs - autotuneStartUs) < autotuneDurationUs) {
+    const float elapsedS = (nowUs - autotuneStartUs) * 1.0e-6f;
+    const float phase = TWO_PI_F * 2.0f * elapsedS;
+    const float dither = autotuneAmplitudeRad * sinf(phase);
+    if (mode == MODE_POSITION && positionTargetValid) {
+      const float motorTargetRad = outputTargetToMotorRad(positionTargetOutputRad + dither);
+      setBaseAndTargetStepPosition((int64_t)roundf(motorTargetRad / MOTOR_RAD_PER_MICROSTEP));
+    }
+    return;
+  }
+
+  if (autotuneLoopSelector == AUTOTUNE_VELOCITY || autotuneLoopSelector == AUTOTUNE_BOTH) {
+    velocityPidKp = fmaxf(0.05f, autotuneMaxVelocityRadS * 0.04f);
+    velocityPidKi = fmaxf(0.1f, velocityPidKp * 8.0f);
+  }
+  if (autotuneLoopSelector == AUTOTUNE_POSITION || autotuneLoopSelector == AUTOTUNE_BOTH) {
+    pidEnabled = true;
+    pidKp = fmaxf(0.1f, autotuneAmplitudeRad * 3.0f);
+    pidKi = fmaxf(0.01f, pidKp * 0.15f);
+    pidKd = fmaxf(0.0f, pidKp * 0.01f);
+  }
+  controlState = CONTROL_AUTOTUNE_SUCCESS;
+  setLastControlFault("");
+  resetPidState();
+}
+
 static void serviceAdvancedTargets(float dt, uint32_t nowUs) {
+  serviceAutotune(nowUs);
+
   if (chirpActive) {
     if (mode != MODE_CALIBRATION || faultFlags != FAULT_NONE) {
       chirpActive = false;
@@ -941,8 +1227,7 @@ static void serviceAdvancedTargets(float dt, uint32_t nowUs) {
         chirpActive = false;
         setBaseAndTargetStepPosition(readCurrentStepPosition());
       } else {
-        const float predictedOutput = outputPerMotor * motorEncoder.rad + outputOffsetRad;
-        const float deflection = outputEncoder.rad - predictedOutput;
+        const float deflection = torqueProxyRad();
         if (fabsf(deflection) > chirpMaxDeflectionRad) {
           chirpActive = false;
           setBaseAndTargetStepPosition(readCurrentStepPosition());
@@ -961,6 +1246,43 @@ static void serviceAdvancedTargets(float dt, uint32_t nowUs) {
         }
       }
     }
+    return;
+  }
+
+  if (mode == MODE_VELOCITY) {
+    if (fabsf(outputPerMotor) < 1.0e-9f) {
+      setFaultAndStop(FAULT_CONTROL_ERROR, "BAD_RATIO");
+      return;
+    }
+    const float motorVelocityRadS = velocityTargetOutputRadS / outputPerMotor;
+    const float deltaMotorRad = motorVelocityRadS * dt;
+    baseTargetStepPosition += (int64_t)roundf(deltaMotorRad / MOTOR_RAD_PER_MICROSTEP);
+    setTargetStepPosition(baseTargetStepPosition);
+    maxMoveSpeedSps = clampFloat(fabsf(motorVelocityRadS) / MOTOR_RAD_PER_MICROSTEP, 1.0f, MAX_STEP_RATE_SPS);
+    return;
+  }
+
+  if (mode == MODE_TORQUE_PROXY) {
+    const uint32_t elapsedUs = nowUs - torqueProxyStartUs;
+    if (elapsedUs > torqueProxyTimeoutUs) {
+      setFaultAndStop(FAULT_CONTROL_ERROR, "TORQUE_TIMEOUT");
+      return;
+    }
+    if (fabsf(motorEncoder.rad - torqueProxyStartMotorRad) > torqueProxyMaxExcursionRad) {
+      setFaultAndStop(FAULT_CONTROL_ERROR, "TORQUE_EXCURSION");
+      return;
+    }
+    const float error = torqueProxyTargetRad - torqueProxyRad();
+    float motorVelocityRadS = -torqueProxyKp * error;
+    motorVelocityRadS = clampFloat(
+        motorVelocityRadS,
+        -torqueProxyCommandMaxVelocityRadS,
+        torqueProxyCommandMaxVelocityRadS);
+    const float deltaMotorRad = motorVelocityRadS * dt;
+    baseTargetStepPosition += (int64_t)roundf(deltaMotorRad / MOTOR_RAD_PER_MICROSTEP);
+    setTargetStepPosition(baseTargetStepPosition);
+    maxMoveSpeedSps = clampFloat(fabsf(motorVelocityRadS) / MOTOR_RAD_PER_MICROSTEP, 1.0f, MAX_STEP_RATE_SPS);
+    moveAccelSps2 = clampFloat(maxMoveSpeedSps * 20.0f, 1.0f, MAX_STEP_RATE_SPS * 20.0f);
     return;
   }
 
@@ -1033,16 +1355,27 @@ static void serviceMotionPlanner() {
       chirpActive = false;
       positionTargetValid = false;
       resetPidState();
+      serviceCurrentControl(tickUs);
       return;
     }
 
+    serviceMissedStepCorrection();
+    if (faultFlags != FAULT_NONE) {
+      serviceCurrentControl(tickUs);
+      return;
+    }
     serviceAdvancedTargets(dt, tickUs);
+    if (faultFlags != FAULT_NONE) {
+      serviceCurrentControl(tickUs);
+      return;
+    }
     const int64_t current = readCurrentStepPosition();
     const int64_t target = readTargetStepPosition();
     const int64_t distance = target - current;
     if (distance == 0 && fabsf(currentSpeedSps) < 0.5f) {
       currentSpeedSps = 0.0f;
       setStepIntervalUs(0);
+      serviceCurrentControl(tickUs);
       continue;
     }
 
@@ -1074,6 +1407,7 @@ static void serviceMotionPlanner() {
     }
     currentSpeedSps = direction * speedAbs;
     setStepIntervalUs(speedToStepIntervalUs(speedAbs));
+    serviceCurrentControl(tickUs);
   }
 }
 
@@ -1134,21 +1468,36 @@ static uint16_t appendProtocolString(uint8_t *p, const char *s) {
 static void sendInfoResponse(uint16_t sequence) {
   uint8_t data[96];
   uint8_t *p = data;
-  appendU16(p, 1);
+  appendU16(p, 2);
   p += appendProtocolString(p, "xiao_esp32c6_actuator");
-  p += appendProtocolString(p, "fw-0.1.0");
+  p += appendProtocolString(p, "fw-0.2.0");
   p += appendProtocolString(p, "xiao_esp32c6_tmc2209_as5600x2");
   sendResponse(CMD_INFO, RESP_OK, data, (uint16_t)(p - data), sequence);
 }
 
 static void sendConfigResponse(uint16_t sequence) {
-  char json[512];
+  char json[1536];
   const int n = snprintf(
       json,
       sizeof(json),
       "{\"output_per_motor\":%.8g,\"output_offset_rad\":%.8g,"
       "\"pid_enabled\":%s,\"pid_kp\":%.8g,\"pid_ki\":%.8g,\"pid_kd\":%.8g,"
       "\"pid_i_limit_motor_rad\":%.8g,\"pid_output_limit_motor_rad\":%.8g,"
+      "\"velocity_pid_kp\":%.8g,\"velocity_pid_ki\":%.8g,"
+      "\"velocity_pid_i_limit_motor_rad\":%.8g,"
+      "\"torque_proxy_kp\":%.8g,\"torque_proxy_limit_rad\":%.8g,"
+      "\"torque_proxy_max_motor_velocity_rad_s\":%.8g,"
+      "\"torque_proxy_timeout_s\":%.8g,"
+      "\"missed_step_correction_enabled\":%s,"
+      "\"missed_step_warn_motor_rad\":%.8g,"
+      "\"missed_step_fault_motor_rad\":%.8g,"
+      "\"missed_step_correction_rate\":%.8g,"
+      "\"current_control_enabled\":%s,\"idle_current_ma\":%u,"
+      "\"hold_current_ma\":%u,\"run_current_ma\":%u,"
+      "\"current_downshift_delay_s\":%.8g,"
+      "\"autotune_max_amplitude_rad\":%.8g,"
+      "\"autotune_max_duration_s\":%.8g,"
+      "\"autotune_max_deflection_rad\":%.8g,"
       "\"backlash_motor_rad\":%.8g,\"backlash_comp_enabled\":%s,"
       "\"resonance_frequency_hz\":%.8g,\"resonance_derating_enabled\":%s}",
       outputPerMotor,
@@ -1159,6 +1508,25 @@ static void sendConfigResponse(uint16_t sequence) {
       pidKd,
       pidILimitMotorRad,
       pidOutputLimitMotorRad,
+      velocityPidKp,
+      velocityPidKi,
+      velocityPidILimitMotorRad,
+      torqueProxyKp,
+      torqueProxyLimitRad,
+      torqueProxyMaxMotorVelocityRadS,
+      (float)torqueProxyTimeoutUs * 1.0e-6f,
+      missedStepCorrectionEnabled ? "true" : "false",
+      missedStepWarnMotorRad,
+      missedStepFaultMotorRad,
+      missedStepCorrectionRate,
+      currentControlEnabled ? "true" : "false",
+      idleCurrentMa,
+      holdCurrentMa,
+      runCurrentMa,
+      currentDownshiftDelayS,
+      autotuneMaxAmplitudeRad,
+      autotuneMaxDurationS,
+      autotuneMaxDeflectionRad,
       backlashMotorRad,
       backlashCompEnabled ? "true" : "false",
       resonanceFrequencyHz,
@@ -1197,7 +1565,7 @@ static void sendSelfTestResponse(uint16_t sequence) {
 }
 
 static void sendTelemetry() {
-  uint8_t payload[61];
+  uint8_t payload[78];
   uint8_t *p = payload;
   telemetrySeq++;
   const int64_t issuedStepPosition = readTargetStepPosition();
@@ -1212,11 +1580,16 @@ static void sendTelemetry() {
   appendFloat(p, outputEncoder.rad);
   appendFloat(p, motorEncoder.velocityRadS);
   appendFloat(p, outputEncoder.velocityRadS);
-  appendFloat(p, driverEnabled ? (float)MOTOR_RMS_CURRENT_MA / 1000.0f : 0.0f);
+  appendFloat(p, driverEnabled ? (float)commandedCurrentMa / 1000.0f : 0.0f);
   appendFloat(p, DEFAULT_BUS_VOLTAGE);
   appendFloat(p, DEFAULT_TEMPERATURE_C);
   appendU32(p, faultFlags);
   *p++ = (uint8_t)mode;
+  appendFloat(p, positionTargetOutputRad);
+  appendFloat(p, torqueProxyRad());
+  appendFloat(p, motorSlipRad);
+  appendFloat(p, driverEnabled ? (float)commandedCurrentMa / 1000.0f : 0.0f);
+  *p++ = controlState;
 
   sendFrame(PACKET_TELEMETRY, (uint16_t)(telemetrySeq & 0xFFFF), payload, (uint16_t)(p - payload));
 }
@@ -1342,6 +1715,206 @@ static bool parseSetConfigPayload(const uint8_t *payload, uint16_t len, uint8_t 
     return true;
   }
 
+  if (strcmp(key, "velocity_pid_kp") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    velocityPidKp = sanitizePidGain(value);
+    resetPidState();
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "velocity_pid_ki") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    velocityPidKi = sanitizePidGain(value);
+    resetPidState();
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "velocity_pid_i_limit_motor_rad") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    velocityPidILimitMotorRad = sanitizePidLimit(fabsf(value), 0.2f);
+    resetPidState();
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "torque_proxy_kp") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    torqueProxyKp = sanitizePidGain(value);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "torque_proxy_limit_rad") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    torqueProxyLimitRad = clampFloat(fabsf(value), 0.001f, 10.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "torque_proxy_max_motor_velocity_rad_s") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    torqueProxyMaxMotorVelocityRadS = clampFloat(fabsf(value), 0.01f, MAX_VELOCITY_RAD_S);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "torque_proxy_timeout_s") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    const float seconds = clampFloat(fabsf(value), 0.05f, 120.0f);
+    torqueProxyTimeoutUs = (uint32_t)(seconds * 1000000.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "missed_step_correction_enabled") == 0) {
+    if (!valueIsBool) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    missedStepCorrectionEnabled = boolValue;
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "missed_step_warn_motor_rad") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    missedStepWarnMotorRad = clampFloat(fabsf(value), 0.0f, missedStepFaultMotorRad);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "missed_step_fault_motor_rad") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    missedStepFaultMotorRad = clampFloat(fabsf(value), 0.001f, 10.0f);
+    if (missedStepWarnMotorRad > missedStepFaultMotorRad) {
+      missedStepWarnMotorRad = missedStepFaultMotorRad;
+    }
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "missed_step_correction_rate") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    missedStepCorrectionRate = clampFloat(value, 0.0f, 1.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "current_control_enabled") == 0) {
+    if (!valueIsBool) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    currentControlEnabled = boolValue;
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "idle_current_ma") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    idleCurrentMa = (uint16_t)clampFloat(fabsf(value), 0.0f, 2000.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "hold_current_ma") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    holdCurrentMa = (uint16_t)clampFloat(fabsf(value), 0.0f, (float)runCurrentMa);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "run_current_ma") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    runCurrentMa = (uint16_t)clampFloat(fabsf(value), 1.0f, 2000.0f);
+    if (holdCurrentMa > runCurrentMa) {
+      holdCurrentMa = runCurrentMa;
+    }
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "current_downshift_delay_s") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    currentDownshiftDelayS = clampFloat(fabsf(value), 0.0f, 30.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "autotune_max_amplitude_rad") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    autotuneMaxAmplitudeRad = clampFloat(fabsf(value), 0.001f, 10.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "autotune_max_duration_s") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    autotuneMaxDurationS = clampFloat(fabsf(value), 0.05f, 120.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
+  if (strcmp(key, "autotune_max_deflection_rad") == 0) {
+    if (!valueIsNumber) {
+      sendResponse(command, RESP_BAD_PARAM, sequence);
+      return false;
+    }
+    autotuneMaxDeflectionRad = clampFloat(fabsf(value), 0.001f, 10.0f);
+    sendResponse(command, RESP_OK, sequence);
+    return true;
+  }
+
   if (strcmp(key, "backlash_motor_rad") == 0) {
     if (!valueIsNumber) {
       sendResponse(command, RESP_BAD_PARAM, sequence);
@@ -1388,6 +1961,71 @@ static bool parseSetConfigPayload(const uint8_t *payload, uint16_t len, uint8_t 
   sendResponse(command, RESP_BAD_PARAM, sequence);
   return false;
 }
+
+static ResponseStatus configureOutputPositionTarget(
+    float targetOrDeltaOutputRad,
+    float velocityOutputRadS,
+    float accelOutputRadS2,
+    bool relativeTarget) {
+  if (faultFlags != FAULT_NONE) {
+    return RESP_FAULT;
+  }
+  if (mode != MODE_POSITION) {
+    return RESP_BAD_MODE;
+  }
+  if (fabsf(outputPerMotor) < 1.0e-9f ||
+      !isfinite(targetOrDeltaOutputRad) ||
+      !isfinite(velocityOutputRadS) ||
+      !isfinite(accelOutputRadS2)) {
+    return RESP_BAD_PARAM;
+  }
+
+  float targetOutputRad =
+      relativeTarget ? outputEncoder.rad + targetOrDeltaOutputRad : targetOrDeltaOutputRad;
+  float outputDeltaRad = targetOutputRad - outputEncoder.rad;
+  if (relativeTarget) {
+    outputDeltaRad = clampFloat(outputDeltaRad, -MAX_MOVE_RAD, MAX_MOVE_RAD);
+    targetOutputRad = outputEncoder.rad + outputDeltaRad;
+  }
+  velocityOutputRadS = clampFloat(fabsf(velocityOutputRadS), 0.01f, MAX_VELOCITY_RAD_S);
+  accelOutputRadS2 = clampFloat(fabsf(accelOutputRadS2), 0.01f, MAX_ACCEL_RAD_S2);
+  if (resonanceDeratingEnabled && resonanceFrequencyHz > 0.1f && fabsf(outputDeltaRad) > 1.0e-6f) {
+    const float minDurationS = 2.0f / resonanceFrequencyHz;
+    velocityOutputRadS = fminf(velocityOutputRadS, fmaxf(0.01f, fabsf(outputDeltaRad) / minDurationS));
+    accelOutputRadS2 = fminf(accelOutputRadS2, fmaxf(0.01f, velocityOutputRadS * resonanceFrequencyHz * 2.0f));
+  }
+
+  const float currentMotorRad = (float)readCurrentStepPosition() * MOTOR_RAD_PER_MICROSTEP;
+  float desiredMotorRad = (targetOutputRad - outputOffsetRad) / outputPerMotor;
+  const int8_t direction = desiredMotorRad >= currentMotorRad ? 1 : -1;
+  if (backlashCompEnabled) {
+    if (backlashDirection != 0 && direction != backlashDirection) {
+      backlashOffsetMotorRad = direction > 0 ? backlashMotorRad : -backlashMotorRad;
+    } else if (backlashDirection == 0) {
+      backlashOffsetMotorRad = direction > 0 ? backlashMotorRad : -backlashMotorRad;
+    }
+    desiredMotorRad += backlashOffsetMotorRad;
+  }
+  backlashDirection = direction;
+  lastPositionDirection = direction;
+
+  chirpActive = false;
+  positionTargetValid = true;
+  positionTargetOutputRad = targetOutputRad;
+  resetPidState();
+  setBaseAndTargetStepPosition((int64_t)roundf(desiredMotorRad / MOTOR_RAD_PER_MICROSTEP));
+  maxMoveSpeedSps = clampFloat(
+      velocityOutputRadS / fabsf(outputPerMotor) / MOTOR_RAD_PER_MICROSTEP,
+      1.0f,
+      MAX_STEP_RATE_SPS);
+  moveAccelSps2 = clampFloat(
+      accelOutputRadS2 / fabsf(outputPerMotor) / MOTOR_RAD_PER_MICROSTEP,
+      1.0f,
+      MAX_STEP_RATE_SPS * 20.0f);
+  enableDriver(true);
+  return RESP_OK;
+}
+
 static void handleMoveRel(const uint8_t *payload, uint16_t len, uint16_t sequence) {
   if (len != 12) {
     sendResponse(CMD_MOVE_REL, RESP_BAD_PARAM, sequence);
@@ -1432,60 +2070,13 @@ static void handleMoveOutputRel(const uint8_t *payload, uint16_t len, uint16_t s
     sendResponse(CMD_MOVE_OUTPUT_REL, RESP_BAD_PARAM, sequence);
     return;
   }
-  if (faultFlags != FAULT_NONE) {
-    sendResponse(CMD_MOVE_OUTPUT_REL, RESP_FAULT, sequence);
-    return;
-  }
-  if (mode != MODE_POSITION) {
-    sendResponse(CMD_MOVE_OUTPUT_REL, RESP_BAD_MODE, sequence);
-    return;
-  }
-  if (fabsf(outputPerMotor) < 1.0e-9f) {
-    sendResponse(CMD_MOVE_OUTPUT_REL, RESP_BAD_PARAM, sequence);
-    return;
-  }
 
   float deltaOutputRad = readFloatLe(payload);
   float velocityOutputRadS = readFloatLe(payload + 4);
   float accelOutputRadS2 = readFloatLe(payload + 8);
-  if (!isfinite(deltaOutputRad) || !isfinite(velocityOutputRadS) || !isfinite(accelOutputRadS2)) {
-    sendResponse(CMD_MOVE_OUTPUT_REL, RESP_BAD_PARAM, sequence);
-    return;
-  }
-
-  deltaOutputRad = clampFloat(deltaOutputRad, -MAX_MOVE_RAD, MAX_MOVE_RAD);
-  velocityOutputRadS = clampFloat(fabsf(velocityOutputRadS), 0.01f, MAX_VELOCITY_RAD_S);
-  accelOutputRadS2 = clampFloat(fabsf(accelOutputRadS2), 0.01f, MAX_ACCEL_RAD_S2);
-  if (resonanceDeratingEnabled && resonanceFrequencyHz > 0.1f && fabsf(deltaOutputRad) > 1.0e-6f) {
-    const float minDurationS = 2.0f / resonanceFrequencyHz;
-    velocityOutputRadS = fminf(velocityOutputRadS, fmaxf(0.01f, fabsf(deltaOutputRad) / minDurationS));
-    accelOutputRadS2 = fminf(accelOutputRadS2, fmaxf(0.01f, velocityOutputRadS * resonanceFrequencyHz * 2.0f));
-  }
-
-  float motorDeltaRad = deltaOutputRad / outputPerMotor;
-  const int8_t direction = motorDeltaRad >= 0.0f ? 1 : -1;
-  if (backlashCompEnabled && lastPositionDirection != 0 && direction != lastPositionDirection) {
-    motorDeltaRad += motorDeltaRad >= 0.0f ? backlashMotorRad : -backlashMotorRad;
-  }
-  lastPositionDirection = direction;
-
-  const int64_t current = readCurrentStepPosition();
-  const int64_t deltaSteps = (int64_t)roundf(motorDeltaRad / MOTOR_RAD_PER_MICROSTEP);
-  chirpActive = false;
-  positionTargetValid = true;
-  positionTargetOutputRad = outputEncoder.rad + deltaOutputRad;
-  resetPidState();
-  setBaseAndTargetStepPosition(current + deltaSteps);
-  maxMoveSpeedSps = clampFloat(
-      velocityOutputRadS / fabsf(outputPerMotor) / MOTOR_RAD_PER_MICROSTEP,
-      1.0f,
-      MAX_STEP_RATE_SPS);
-  moveAccelSps2 = clampFloat(
-      accelOutputRadS2 / fabsf(outputPerMotor) / MOTOR_RAD_PER_MICROSTEP,
-      1.0f,
-      MAX_STEP_RATE_SPS * 20.0f);
-  enableDriver(true);
-  sendResponse(CMD_MOVE_OUTPUT_REL, RESP_OK, sequence);
+  const ResponseStatus status =
+      configureOutputPositionTarget(deltaOutputRad, velocityOutputRadS, accelOutputRadS2, true);
+  sendResponse(CMD_MOVE_OUTPUT_REL, status, sequence);
 }
 
 static void handleStartChirp(const uint8_t *payload, uint16_t len, uint16_t sequence) {
@@ -1533,6 +2124,180 @@ static void handleStartChirp(const uint8_t *payload, uint16_t len, uint16_t sequ
   sendResponse(CMD_START_CHIRP, RESP_OK, sequence);
 }
 
+static void handleSetPositionTarget(const uint8_t *payload, uint16_t len, uint16_t sequence) {
+  if (len != 13) {
+    sendResponse(CMD_SET_POSITION_TARGET, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  const float targetOutputRad = readFloatLe(payload);
+  const float velocityOutputRadS = readFloatLe(payload + 4);
+  const float accelOutputRadS2 = readFloatLe(payload + 8);
+  const bool relativeTarget = (payload[12] & 0x01) != 0;
+  const ResponseStatus status =
+      configureOutputPositionTarget(targetOutputRad, velocityOutputRadS, accelOutputRadS2, relativeTarget);
+  sendResponse(CMD_SET_POSITION_TARGET, status, sequence);
+}
+
+static void handleSetVelocityTarget(const uint8_t *payload, uint16_t len, uint16_t sequence) {
+  if (len != 8) {
+    sendResponse(CMD_SET_VELOCITY_TARGET, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  if (faultFlags != FAULT_NONE) {
+    sendResponse(CMD_SET_VELOCITY_TARGET, RESP_FAULT, sequence);
+    return;
+  }
+  if (mode != MODE_VELOCITY) {
+    sendResponse(CMD_SET_VELOCITY_TARGET, RESP_BAD_MODE, sequence);
+    return;
+  }
+  if (fabsf(outputPerMotor) < 1.0e-9f) {
+    sendResponse(CMD_SET_VELOCITY_TARGET, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  float outputVelocityRadS = readFloatLe(payload);
+  float accelOutputRadS2 = readFloatLe(payload + 4);
+  if (!isfinite(outputVelocityRadS) || !isfinite(accelOutputRadS2)) {
+    sendResponse(CMD_SET_VELOCITY_TARGET, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  outputVelocityRadS = clampFloat(outputVelocityRadS, -MAX_VELOCITY_RAD_S, MAX_VELOCITY_RAD_S);
+  accelOutputRadS2 = clampFloat(fabsf(accelOutputRadS2), 0.01f, MAX_ACCEL_RAD_S2);
+  velocityTargetOutputRadS = outputVelocityRadS;
+  chirpActive = false;
+  positionTargetValid = false;
+  resetPidState();
+  baseTargetStepPosition = readCurrentStepPosition();
+  setTargetStepPosition(baseTargetStepPosition);
+  maxMoveSpeedSps = clampFloat(fabsf(outputVelocityRadS / outputPerMotor) / MOTOR_RAD_PER_MICROSTEP, 1.0f, MAX_STEP_RATE_SPS);
+  moveAccelSps2 = clampFloat(accelOutputRadS2 / fabsf(outputPerMotor) / MOTOR_RAD_PER_MICROSTEP, 1.0f, MAX_STEP_RATE_SPS * 20.0f);
+  enableDriver(true);
+  sendResponse(CMD_SET_VELOCITY_TARGET, RESP_OK, sequence);
+}
+
+static void handleSetTorqueProxyTarget(const uint8_t *payload, uint16_t len, uint16_t sequence) {
+  if (len != 16) {
+    sendResponse(CMD_SET_TORQUE_PROXY_TARGET, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  if (faultFlags != FAULT_NONE) {
+    sendResponse(CMD_SET_TORQUE_PROXY_TARGET, RESP_FAULT, sequence);
+    return;
+  }
+  if (mode != MODE_TORQUE_PROXY) {
+    sendResponse(CMD_SET_TORQUE_PROXY_TARGET, RESP_BAD_MODE, sequence);
+    return;
+  }
+  const float targetDeflectionRad = readFloatLe(payload);
+  const float maxMotorVelocityRadS = readFloatLe(payload + 4);
+  const float maxMotorExcursionRad = readFloatLe(payload + 8);
+  const float timeoutS = readFloatLe(payload + 12);
+  if (!isfinite(targetDeflectionRad) || !isfinite(maxMotorVelocityRadS) ||
+      !isfinite(maxMotorExcursionRad) || !isfinite(timeoutS)) {
+    sendResponse(CMD_SET_TORQUE_PROXY_TARGET, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  torqueProxyTargetRad = clampFloat(targetDeflectionRad, -torqueProxyLimitRad, torqueProxyLimitRad);
+  torqueProxyCommandMaxVelocityRadS =
+      clampFloat(fabsf(maxMotorVelocityRadS), 0.01f, torqueProxyMaxMotorVelocityRadS);
+  torqueProxyMaxExcursionRad = clampFloat(fabsf(maxMotorExcursionRad), 0.001f, 10.0f);
+  torqueProxyTimeoutUs = (uint32_t)(clampFloat(fabsf(timeoutS), 0.05f, 120.0f) * 1000000.0f);
+  torqueProxyStartUs = micros();
+  torqueProxyStartMotorRad = motorEncoder.rad;
+  chirpActive = false;
+  positionTargetValid = false;
+  resetPidState();
+  baseTargetStepPosition = readCurrentStepPosition();
+  setTargetStepPosition(baseTargetStepPosition);
+  enableDriver(true);
+  sendResponse(CMD_SET_TORQUE_PROXY_TARGET, RESP_OK, sequence);
+}
+
+static void handleAutotuneControl(const uint8_t *payload, uint16_t len, uint16_t sequence) {
+  if (len != 17) {
+    sendResponse(CMD_AUTOTUNE_CONTROL, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  if (faultFlags != FAULT_NONE) {
+    sendResponse(CMD_AUTOTUNE_CONTROL, RESP_FAULT, sequence);
+    return;
+  }
+  if (mode != MODE_POSITION && mode != MODE_VELOCITY) {
+    sendResponse(CMD_AUTOTUNE_CONTROL, RESP_BAD_MODE, sequence);
+    return;
+  }
+  const uint8_t loopSelector = payload[0];
+  const float amplitudeRad = readFloatLe(payload + 1);
+  const float maxVelocityRadS = readFloatLe(payload + 5);
+  const float durationS = readFloatLe(payload + 9);
+  const float maxDeflectionRad = readFloatLe(payload + 13);
+  if ((loopSelector != AUTOTUNE_VELOCITY &&
+       loopSelector != AUTOTUNE_POSITION &&
+       loopSelector != AUTOTUNE_BOTH) ||
+      !isfinite(amplitudeRad) ||
+      !isfinite(maxVelocityRadS) ||
+      !isfinite(durationS) ||
+      !isfinite(maxDeflectionRad)) {
+    sendResponse(CMD_AUTOTUNE_CONTROL, RESP_BAD_PARAM, sequence);
+    return;
+  }
+  autotuneLoopSelector = loopSelector;
+  autotuneAmplitudeRad = clampFloat(fabsf(amplitudeRad), 0.001f, autotuneMaxAmplitudeRad);
+  autotuneMaxVelocityRadS = clampFloat(fabsf(maxVelocityRadS), 0.01f, MAX_VELOCITY_RAD_S);
+  autotuneDurationUs = (uint32_t)(clampFloat(fabsf(durationS), 0.05f, autotuneMaxDurationS) * 1000000.0f);
+  autotuneActiveMaxDeflectionRad = clampFloat(fabsf(maxDeflectionRad), 0.001f, autotuneMaxDeflectionRad);
+  autotuneStartUs = micros();
+  controlState = CONTROL_AUTOTUNE_RUNNING;
+  setLastControlFault("");
+  enableDriver(true);
+  sendResponse(CMD_AUTOTUNE_CONTROL, RESP_OK, sequence);
+}
+
+static const char *modeName(ActuatorMode value) {
+  switch (value) {
+    case MODE_DISABLED: return "DISABLED";
+    case MODE_CALIBRATION: return "CALIBRATION";
+    case MODE_OPEN_LOOP: return "OPEN_LOOP";
+    case MODE_POSITION: return "POSITION";
+    case MODE_VELOCITY: return "VELOCITY";
+    case MODE_TORQUE_PROXY: return "TORQUE_PROXY";
+    case MODE_FAULT: return "FAULT";
+  }
+  return "UNKNOWN";
+}
+
+static void sendControlStatusResponse(uint16_t sequence) {
+  char json[512];
+  const int n = snprintf(
+      json,
+      sizeof(json),
+      "{\"mode\":%u,\"mode_name\":\"%s\","
+      "\"target_motor_rad\":%.8g,\"target_output_rad\":%.8g,"
+      "\"velocity_target_output_rad_s\":%.8g,"
+      "\"torque_proxy_target_rad\":%.8g,\"torque_proxy_rad\":%.8g,"
+      "\"motor_slip_rad\":%.8g,\"commanded_current_a\":%.8g,"
+      "\"autotune_state\":%u,\"autotune_loop_selector\":%u,"
+      "\"last_control_fault\":\"%s\",\"fault_flags\":%lu}",
+      (unsigned)mode,
+      modeName(mode),
+      (float)readTargetStepPosition() * MOTOR_RAD_PER_MICROSTEP,
+      positionTargetOutputRad,
+      velocityTargetOutputRadS,
+      torqueProxyTargetRad,
+      torqueProxyRad(),
+      motorSlipRad,
+      (float)commandedCurrentMa / 1000.0f,
+      (unsigned)controlState,
+      (unsigned)autotuneLoopSelector,
+      lastControlFault,
+      (unsigned long)faultFlags);
+  uint16_t len = 0;
+  if (n > 0) {
+    len = (n >= (int)sizeof(json)) ? (uint16_t)(sizeof(json) - 1) : (uint16_t)n;
+  }
+  sendResponse(CMD_GET_CONTROL_STATUS, RESP_OK, reinterpret_cast<const uint8_t *>(json), len, sequence);
+}
+
 static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t len) {
   if (len < 1) {
     faultFlags |= FAULT_PROTOCOL_ERROR;
@@ -1575,6 +2340,7 @@ static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t le
           data[0] != MODE_OPEN_LOOP &&
           data[0] != MODE_POSITION &&
           data[0] != MODE_VELOCITY &&
+          data[0] != MODE_TORQUE_PROXY &&
           data[0] != MODE_FAULT) {
         sendResponse(command, RESP_BAD_PARAM, sequence);
         break;
@@ -1600,6 +2366,26 @@ static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t le
       handleMoveOutputRel(data, dataLen, sequence);
       break;
 
+    case CMD_SET_POSITION_TARGET:
+      handleSetPositionTarget(data, dataLen, sequence);
+      break;
+
+    case CMD_SET_VELOCITY_TARGET:
+      handleSetVelocityTarget(data, dataLen, sequence);
+      break;
+
+    case CMD_SET_TORQUE_PROXY_TARGET:
+      handleSetTorqueProxyTarget(data, dataLen, sequence);
+      break;
+
+    case CMD_AUTOTUNE_CONTROL:
+      handleAutotuneControl(data, dataLen, sequence);
+      break;
+
+    case CMD_GET_CONTROL_STATUS:
+      sendControlStatusResponse(sequence);
+      break;
+
     case CMD_STOP:
       stopMotion();
       sendResponse(command, RESP_OK, sequence);
@@ -1615,6 +2401,7 @@ static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t le
     case CMD_ZERO_MOTOR_ENCODER:
       serviceEncoders();
       zeroEncoder(motorEncoder);
+      motorSlipRad = 0.0f;
       currentSpeedSps = 0.0f;
       resetStepPositions();
       sendResponse(command, RESP_OK, sequence);
@@ -1646,6 +2433,8 @@ static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t le
 
     case CMD_CLEAR_FAULTS:
       faultFlags = FAULT_NONE;
+      controlState = CONTROL_IDLE;
+      setLastControlFault("");
       if (mode == MODE_FAULT) {
         setMode(MODE_DISABLED);
       }

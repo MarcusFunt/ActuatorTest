@@ -28,7 +28,12 @@ CRC16_CCITT_FALSE_CHECK = 0x29B1
 _HEADER = struct.Struct("<BBHH")
 _CRC = struct.Struct("<H")
 _TELEMETRY = struct.Struct("<QIffiifffffffIB")
+_TELEMETRY_V2 = struct.Struct("<QIffiifffffffIBffffB")
 _MOVE_REL = struct.Struct("<fff")
+_POSITION_TARGET = struct.Struct("<fffB")
+_VELOCITY_TARGET = struct.Struct("<ff")
+_TORQUE_PROXY_TARGET = struct.Struct("<ffff")
+_AUTOTUNE_CONTROL = struct.Struct("<Bffff")
 _CHIRP = struct.Struct("<fffff")
 FRAME_OVERHEAD_SIZE = len(MAGIC) + _HEADER.size + _CRC.size
 
@@ -63,6 +68,11 @@ class CommandID(IntEnum):
     SELF_TEST = 16
     START_CHIRP = 17
     MOVE_OUTPUT_REL = 18
+    SET_POSITION_TARGET = 19
+    SET_VELOCITY_TARGET = 20
+    SET_TORQUE_PROXY_TARGET = 21
+    AUTOTUNE_CONTROL = 22
+    GET_CONTROL_STATUS = 23
 
 
 class ResponseStatus(IntEnum):
@@ -81,6 +91,7 @@ class ActuatorMode(IntEnum):
     OPEN_LOOP = 2
     POSITION = 3
     VELOCITY = 4
+    TORQUE_PROXY = 5
     FAULT = 255
 
 
@@ -93,6 +104,9 @@ class FaultFlags(IntFlag):
     OVER_TEMPERATURE = 1 << 4
     ESTOP_ACTIVE = 1 << 5
     PROTOCOL_ERROR = 1 << 6
+    MISSED_STEP = 1 << 7
+    CONTROL_ERROR = 1 << 8
+    AUTOTUNE_FAILED = 1 << 9
 
 
 @dataclass(frozen=True)
@@ -140,6 +154,12 @@ class TelemetryPayload:
     temperature: float
     fault_flags: int
     mode: int
+    output_target_rad: float = 0.0
+    torque_proxy_rad: float = 0.0
+    motor_slip_rad: float = 0.0
+    commanded_current: float = 0.0
+    control_state: int = 0
+    telemetry_schema_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -352,6 +372,29 @@ def decode_response_payload(payload: bytes) -> ResponsePayload:
 
 
 def encode_telemetry_payload(telemetry: TelemetryPayload) -> bytes:
+    if telemetry.telemetry_schema_version >= 2:
+        return _TELEMETRY_V2.pack(
+            telemetry.t_us,
+            telemetry.seq,
+            telemetry.cmd_pos,
+            telemetry.cmd_vel,
+            telemetry.motor_enc_raw,
+            telemetry.output_enc_raw,
+            telemetry.motor_rad,
+            telemetry.output_rad,
+            telemetry.motor_vel_rad_s,
+            telemetry.output_vel_rad_s,
+            telemetry.driver_current,
+            telemetry.bus_voltage,
+            telemetry.temperature,
+            telemetry.fault_flags,
+            telemetry.mode,
+            telemetry.output_target_rad,
+            telemetry.torque_proxy_rad,
+            telemetry.motor_slip_rad,
+            telemetry.commanded_current,
+            telemetry.control_state,
+        )
     return _TELEMETRY.pack(
         telemetry.t_us,
         telemetry.seq,
@@ -372,14 +415,23 @@ def encode_telemetry_payload(telemetry: TelemetryPayload) -> bytes:
 
 
 def decode_telemetry_payload(payload: bytes) -> TelemetryPayload:
-    if len(payload) != _TELEMETRY.size:
-        raise ProtocolError(f"telemetry payload must be {_TELEMETRY.size} bytes, got {len(payload)}")
-    values = _TELEMETRY.unpack(payload)
-    return TelemetryPayload(*values)
+    if len(payload) == _TELEMETRY.size:
+        values = _TELEMETRY.unpack(payload)
+        return TelemetryPayload(*values, telemetry_schema_version=1)
+    if len(payload) == _TELEMETRY_V2.size:
+        values = _TELEMETRY_V2.unpack(payload)
+        return TelemetryPayload(*values, telemetry_schema_version=2)
+    raise ProtocolError(
+        f"telemetry payload must be {_TELEMETRY.size} or {_TELEMETRY_V2.size} bytes, got {len(payload)}"
+    )
 
 
 def telemetry_payload_size() -> int:
     return _TELEMETRY.size
+
+
+def telemetry_payload_v2_size() -> int:
+    return _TELEMETRY_V2.size
 
 
 def pack_mode_payload(mode: ActuatorMode) -> bytes:
@@ -413,6 +465,81 @@ def unpack_move_output_rel_payload(payload: bytes) -> tuple[float, float, float]
     if len(payload) != _MOVE_REL.size:
         raise ProtocolError("MOVE_OUTPUT_REL payload must contain delta, velocity, accel as float32")
     return _MOVE_REL.unpack(payload)
+
+
+def pack_position_target_payload(
+    target_output_rad: float,
+    velocity_rad_s: float,
+    accel_rad_s2: float,
+    *,
+    relative: bool = False,
+) -> bytes:
+    flags = 1 if relative else 0
+    return _POSITION_TARGET.pack(float(target_output_rad), float(velocity_rad_s), float(accel_rad_s2), flags)
+
+
+def unpack_position_target_payload(payload: bytes) -> tuple[float, float, float, int]:
+    if len(payload) != _POSITION_TARGET.size:
+        raise ProtocolError("SET_POSITION_TARGET payload must contain target, velocity, accel, flags")
+    return _POSITION_TARGET.unpack(payload)
+
+
+def pack_velocity_target_payload(output_velocity_rad_s: float, accel_rad_s2: float) -> bytes:
+    return _VELOCITY_TARGET.pack(float(output_velocity_rad_s), float(accel_rad_s2))
+
+
+def unpack_velocity_target_payload(payload: bytes) -> tuple[float, float]:
+    if len(payload) != _VELOCITY_TARGET.size:
+        raise ProtocolError("SET_VELOCITY_TARGET payload must contain velocity and accel as float32")
+    return _VELOCITY_TARGET.unpack(payload)
+
+
+def pack_torque_proxy_target_payload(
+    target_deflection_rad: float,
+    max_motor_velocity_rad_s: float,
+    max_motor_excursion_rad: float,
+    timeout_s: float,
+) -> bytes:
+    return _TORQUE_PROXY_TARGET.pack(
+        float(target_deflection_rad),
+        float(max_motor_velocity_rad_s),
+        float(max_motor_excursion_rad),
+        float(timeout_s),
+    )
+
+
+def unpack_torque_proxy_target_payload(payload: bytes) -> tuple[float, float, float, float]:
+    if len(payload) != _TORQUE_PROXY_TARGET.size:
+        raise ProtocolError(
+            "SET_TORQUE_PROXY_TARGET payload must contain deflection, velocity, excursion, timeout"
+        )
+    return _TORQUE_PROXY_TARGET.unpack(payload)
+
+
+def pack_autotune_control_payload(
+    loop_selector: int,
+    amplitude_rad: float,
+    max_velocity_rad_s: float,
+    duration_s: float,
+    max_deflection_rad: float,
+) -> bytes:
+    if not 0 <= int(loop_selector) <= 0xFF:
+        raise ProtocolError("loop_selector must fit uint8")
+    return _AUTOTUNE_CONTROL.pack(
+        int(loop_selector),
+        float(amplitude_rad),
+        float(max_velocity_rad_s),
+        float(duration_s),
+        float(max_deflection_rad),
+    )
+
+
+def unpack_autotune_control_payload(payload: bytes) -> tuple[int, float, float, float, float]:
+    if len(payload) != _AUTOTUNE_CONTROL.size:
+        raise ProtocolError(
+            "AUTOTUNE_CONTROL payload must contain loop selector, amplitude, velocity, duration, max deflection"
+        )
+    return _AUTOTUNE_CONTROL.unpack(payload)
 
 
 def pack_chirp_payload(

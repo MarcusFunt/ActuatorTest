@@ -44,12 +44,20 @@ from .actuator_protocol import (
     pack_mode_payload,
     pack_move_output_rel_payload,
     pack_move_rel_payload,
+    pack_autotune_control_payload,
+    pack_position_target_payload,
+    pack_torque_proxy_target_payload,
+    pack_velocity_target_payload,
     unpack_chirp_payload,
     unpack_faults_payload,
     unpack_info_payload,
     unpack_mode_payload,
     unpack_move_output_rel_payload,
     unpack_move_rel_payload,
+    unpack_autotune_control_payload,
+    unpack_position_target_payload,
+    unpack_torque_proxy_target_payload,
+    unpack_velocity_target_payload,
 )
 
 
@@ -171,7 +179,9 @@ class SimulatedTransport:
         self._target_motor_rad = 0.0
         self._base_target_motor_rad = 0.0
         self._output_target_rad = self._output_rad
+        self._velocity_target_output_rad_s = 0.0
         self._move_velocity = 1.0
+        self._move_accel = 20.0
         self._chirp_active = False
         self._chirp_started_at = 0.0
         self._chirp_center_motor_rad = 0.0
@@ -186,12 +196,49 @@ class SimulatedTransport:
         self.pid_kd = 0.0
         self.pid_i_limit_motor_rad = 0.05
         self.pid_output_limit_motor_rad = 0.25
+        self.velocity_pid_kp = 0.2
+        self.velocity_pid_ki = 2.0
+        self.velocity_pid_i_limit_motor_rad = 0.2
+        self.torque_proxy_kp = 3.0
+        self.torque_proxy_limit_rad = 0.12
+        self.torque_proxy_max_motor_velocity_rad_s = 4.0
+        self.torque_proxy_timeout_s = 3.0
+        self.missed_step_correction_enabled = True
+        self.missed_step_warn_motor_rad = 0.05
+        self.missed_step_fault_motor_rad = 0.25
+        self.missed_step_correction_rate = 0.25
+        self.current_control_enabled = True
+        self.idle_current_ma = 0
+        self.hold_current_ma = 350
+        self.run_current_ma = 1000
+        self.current_downshift_delay_s = 0.5
+        self.autotune_max_amplitude_rad = 0.4
+        self.autotune_max_duration_s = 15.0
+        self.autotune_max_deflection_rad = 0.25
         self.backlash_motor_rad = 0.0
         self.backlash_comp_enabled = False
         self.resonance_derating_enabled = False
         self._pid_integral = 0.0
         self._pid_last_error = 0.0
+        self._velocity_integral = 0.0
         self._last_position_direction = 0
+        self._torque_proxy_target_rad = 0.0
+        self._torque_proxy_max_velocity = 0.0
+        self._torque_proxy_max_excursion = 0.0
+        self._torque_proxy_started_at = 0.0
+        self._torque_proxy_start_motor_rad = 0.0
+        self._torque_proxy_deadline = float("inf")
+        self._issued_motor_rad = 0.0
+        self._motor_encoder_bias_rad = 0.0
+        self._motor_slip_rad = 0.0
+        self._commanded_current_a = 0.0
+        self._last_motion_time = time.perf_counter()
+        self._autotune_state = 0
+        self._autotune_loop_selector = 0
+        self._autotune_started_at = 0.0
+        self._autotune_deadline = 0.0
+        self._autotune_amplitude_rad = 0.0
+        self._last_control_fault = ""
         self._rng = random.Random(42)
 
     def open(self) -> None:
@@ -237,6 +284,49 @@ class SimulatedTransport:
     @property
     def is_open(self) -> bool:
         return self._running.is_set()
+
+    def inject_motor_slip(self, slip_rad: float) -> None:
+        """Test hook: offset measured motor encoder angle from issued steps."""
+        with self._lock:
+            self._motor_encoder_bias_rad -= float(slip_rad)
+
+    def _measured_motor_rad(self) -> float:
+        return self._motor_rad + self._motor_encoder_bias_rad
+
+    def _torque_proxy_rad(self) -> float:
+        return self._output_rad - (self.output_per_motor * self._measured_motor_rad() + self.output_offset_rad)
+
+    def _update_motor_slip(self) -> None:
+        self._motor_slip_rad = self._issued_motor_rad - self._measured_motor_rad()
+        if abs(self._motor_slip_rad) >= self.missed_step_fault_motor_rad:
+            self._fault_flags |= FaultFlags.MISSED_STEP
+            self._last_control_fault = "MISSED_STEP"
+            self._mode = ActuatorMode.FAULT
+            self._motor_vel = 0.0
+            return
+        if self.missed_step_correction_enabled and abs(self._motor_slip_rad) >= self.missed_step_warn_motor_rad:
+            correction = self._motor_slip_rad * self.missed_step_correction_rate
+            self._issued_motor_rad -= correction
+            self._target_motor_rad -= correction
+            self._base_target_motor_rad -= correction
+            self._motor_slip_rad = self._issued_motor_rad - self._measured_motor_rad()
+
+    def _update_current_command(self, now: float) -> None:
+        if not self.current_control_enabled:
+            self._commanded_current_a = self.run_current_ma / 1000.0
+            return
+        if self._mode in (ActuatorMode.DISABLED, ActuatorMode.FAULT) or self._fault_flags:
+            self._commanded_current_a = self.idle_current_ma / 1000.0
+            return
+        high_load = abs(self._torque_proxy_rad()) > self.torque_proxy_limit_rad * 0.5
+        moving = abs(self._motor_vel) > 1e-3 or abs(self._target_motor_rad - self._motor_rad) > 0.002
+        if moving or high_load:
+            self._last_motion_time = now
+            self._commanded_current_a = self.run_current_ma / 1000.0
+        elif now - self._last_motion_time >= self.current_downshift_delay_s:
+            self._commanded_current_a = self.hold_current_ma / 1000.0
+        else:
+            self._commanded_current_a = self.run_current_ma / 1000.0
 
     @staticmethod
     def _config_number(value) -> float:
@@ -288,9 +378,9 @@ class SimulatedTransport:
         if command == CommandID.INFO:
             data = pack_info_payload(
                 self.actuator_id,
-                self.firmware_version,
+                "sim-0.2.0",
                 self.hardware_revision,
-                telemetry_schema_version=1,
+                telemetry_schema_version=2,
             )
             self._respond(command, data=data, sequence=sequence)
             return
@@ -314,8 +404,17 @@ class SimulatedTransport:
                     self._motor_vel = 0.0
                     self._target_motor_rad = self._motor_rad
                     self._base_target_motor_rad = self._motor_rad
+                    self._issued_motor_rad = self._motor_rad
+                    self._velocity_target_output_rad_s = 0.0
                     self._chirp_active = False
                     self._reset_pid()
+                if mode == ActuatorMode.TORQUE_PROXY:
+                    self._torque_proxy_target_rad = self._torque_proxy_rad()
+                    self._torque_proxy_started_at = time.perf_counter()
+                    self._torque_proxy_start_motor_rad = self._motor_rad
+                    self._torque_proxy_deadline = float("inf")
+                    self._torque_proxy_max_velocity = self.torque_proxy_max_motor_velocity_rad_s
+                    self._torque_proxy_max_excursion = float("inf")
                 if mode != ActuatorMode.FAULT:
                     self._mode = mode
             self._respond(command, sequence=sequence)
@@ -330,7 +429,9 @@ class SimulatedTransport:
                 self._chirp_active = False
                 self._target_motor_rad = self._motor_rad + float(delta_rad)
                 self._base_target_motor_rad = self._target_motor_rad
+                self._issued_motor_rad = self._motor_rad
                 self._move_velocity = max(0.01, abs(float(velocity_rad_s)))
+                self._move_accel = max(0.01, abs(float(_accel_rad_s2)))
             self._respond(command, sequence=sequence)
             return
 
@@ -354,12 +455,132 @@ class SimulatedTransport:
                 self._output_target_rad = self._output_rad + output_delta
                 self._base_target_motor_rad = self._motor_rad + motor_delta
                 self._target_motor_rad = self._base_target_motor_rad
+                self._issued_motor_rad = self._motor_rad
                 if self.resonance_derating_enabled and self.resonance_frequency_hz:
                     min_duration = 2.0 / max(self.resonance_frequency_hz, 0.1)
                     velocity_output = min(velocity_output, max(0.01, abs(output_delta) / min_duration))
                 self._move_velocity = max(0.01, velocity_output / abs(self.output_per_motor))
+                self._move_accel = max(0.01, abs(float(accel_rad_s2)) / abs(self.output_per_motor))
                 self._reset_pid()
             self._respond(command, sequence=sequence)
+            return
+
+        if command == CommandID.SET_POSITION_TARGET:
+            target_rad, velocity_rad_s, accel_rad_s2, flags = unpack_position_target_payload(payload)
+            with self._lock:
+                if self._mode != ActuatorMode.POSITION or self._fault_flags:
+                    self._respond(command, ResponseStatus.BAD_MODE, sequence=sequence)
+                    return
+                if abs(self.output_per_motor) < 1e-9:
+                    self._respond(command, ResponseStatus.BAD_PARAM, sequence=sequence)
+                    return
+                relative = bool(flags & 0x01)
+                target_output = self._output_rad + float(target_rad) if relative else float(target_rad)
+                output_delta = target_output - self._output_rad
+                velocity_output = max(0.01, abs(float(velocity_rad_s)))
+                if self.resonance_derating_enabled and self.resonance_frequency_hz and abs(output_delta) > 1e-9:
+                    min_duration = 2.0 / max(self.resonance_frequency_hz, 0.1)
+                    velocity_output = min(velocity_output, max(0.01, abs(output_delta) / min_duration))
+                motor_delta = output_delta / self.output_per_motor
+                direction = 1 if motor_delta >= 0.0 else -1
+                if self.backlash_comp_enabled and self._last_position_direction and direction != self._last_position_direction:
+                    motor_delta += math.copysign(abs(self.backlash_motor_rad), motor_delta)
+                self._last_position_direction = direction
+                self._chirp_active = False
+                self._output_target_rad = target_output
+                self._base_target_motor_rad = self._motor_rad + motor_delta
+                self._target_motor_rad = self._base_target_motor_rad
+                self._issued_motor_rad = self._motor_rad
+                self._move_velocity = max(0.01, velocity_output / abs(self.output_per_motor))
+                self._move_accel = max(0.01, abs(float(accel_rad_s2)) / abs(self.output_per_motor))
+                self._reset_pid()
+            self._respond(command, sequence=sequence)
+            return
+
+        if command == CommandID.SET_VELOCITY_TARGET:
+            output_velocity_rad_s, accel_rad_s2 = unpack_velocity_target_payload(payload)
+            with self._lock:
+                if self._mode != ActuatorMode.VELOCITY or self._fault_flags:
+                    self._respond(command, ResponseStatus.BAD_MODE, sequence=sequence)
+                    return
+                if abs(self.output_per_motor) < 1e-9:
+                    self._respond(command, ResponseStatus.BAD_PARAM, sequence=sequence)
+                    return
+                self._chirp_active = False
+                self._velocity_target_output_rad_s = float(output_velocity_rad_s)
+                self._move_accel = max(0.01, abs(float(accel_rad_s2)) / abs(self.output_per_motor))
+                self._target_motor_rad = self._motor_rad
+                self._base_target_motor_rad = self._motor_rad
+                self._issued_motor_rad = self._motor_rad
+                self._reset_pid()
+            self._respond(command, sequence=sequence)
+            return
+
+        if command == CommandID.SET_TORQUE_PROXY_TARGET:
+            target, max_vel, max_excursion, timeout_s = unpack_torque_proxy_target_payload(payload)
+            with self._lock:
+                if self._mode != ActuatorMode.TORQUE_PROXY or self._fault_flags:
+                    self._respond(command, ResponseStatus.BAD_MODE, sequence=sequence)
+                    return
+                if not all(math.isfinite(v) for v in (target, max_vel, max_excursion, timeout_s)):
+                    self._respond(command, ResponseStatus.BAD_PARAM, sequence=sequence)
+                    return
+                now = time.perf_counter()
+                self._chirp_active = False
+                self._torque_proxy_target_rad = max(
+                    -self.torque_proxy_limit_rad,
+                    min(float(target), self.torque_proxy_limit_rad),
+                )
+                self._torque_proxy_max_velocity = max(0.01, abs(float(max_vel)))
+                self._torque_proxy_max_excursion = max(0.001, abs(float(max_excursion)))
+                self._torque_proxy_started_at = now
+                self._torque_proxy_start_motor_rad = self._motor_rad
+                self._torque_proxy_deadline = now + max(0.05, abs(float(timeout_s)))
+                self._issued_motor_rad = self._motor_rad
+                self._reset_pid()
+            self._respond(command, sequence=sequence)
+            return
+
+        if command == CommandID.AUTOTUNE_CONTROL:
+            loop_selector, amplitude, max_velocity, duration_s, max_deflection = unpack_autotune_control_payload(payload)
+            with self._lock:
+                if self._mode not in (ActuatorMode.POSITION, ActuatorMode.VELOCITY) or self._fault_flags:
+                    self._respond(command, ResponseStatus.BAD_MODE, sequence=sequence)
+                    return
+                if loop_selector not in (1, 2, 3):
+                    self._respond(command, ResponseStatus.BAD_PARAM, sequence=sequence)
+                    return
+                now = time.perf_counter()
+                self._autotune_loop_selector = int(loop_selector)
+                self._autotune_amplitude_rad = max(0.001, min(abs(float(amplitude)), self.autotune_max_amplitude_rad))
+                self._move_velocity = max(0.01, abs(float(max_velocity)))
+                duration = max(0.05, min(abs(float(duration_s)), self.autotune_max_duration_s))
+                self._chirp_active = False
+                self._autotune_started_at = now
+                self._autotune_deadline = now + duration
+                self._autotune_state = 1
+                self._last_control_fault = ""
+            self._respond(command, sequence=sequence)
+            return
+
+        if command == CommandID.GET_CONTROL_STATUS:
+            with self._lock:
+                status = {
+                    "mode": int(self._mode),
+                    "mode_name": self._mode.name,
+                    "target_motor_rad": self._target_motor_rad,
+                    "target_output_rad": self._output_target_rad,
+                    "velocity_target_output_rad_s": self._velocity_target_output_rad_s,
+                    "torque_proxy_target_rad": self._torque_proxy_target_rad,
+                    "torque_proxy_rad": self._torque_proxy_rad(),
+                    "motor_slip_rad": self._motor_slip_rad,
+                    "commanded_current_a": self._commanded_current_a,
+                    "autotune_state": self._autotune_state,
+                    "autotune_loop_selector": self._autotune_loop_selector,
+                    "last_control_fault": self._last_control_fault,
+                    "fault_flags": int(self._fault_flags),
+                }
+            self._respond(command, data=json.dumps(status).encode("utf-8"), sequence=sequence)
             return
 
         if command == CommandID.START_CHIRP:
@@ -391,7 +612,9 @@ class SimulatedTransport:
             with self._lock:
                 self._target_motor_rad = self._motor_rad
                 self._base_target_motor_rad = self._motor_rad
+                self._issued_motor_rad = self._motor_rad
                 self._motor_vel = 0.0
+                self._velocity_target_output_rad_s = 0.0
                 self._chirp_active = False
                 self._reset_pid()
             self._respond(command, sequence=sequence)
@@ -401,7 +624,9 @@ class SimulatedTransport:
             with self._lock:
                 self._target_motor_rad = self._motor_rad
                 self._base_target_motor_rad = self._motor_rad
+                self._issued_motor_rad = self._motor_rad
                 self._motor_vel = 0.0
+                self._velocity_target_output_rad_s = 0.0
                 self._chirp_active = False
                 self._reset_pid()
                 self._fault_flags |= FaultFlags.ESTOP_ACTIVE
@@ -413,7 +638,9 @@ class SimulatedTransport:
             with self._lock:
                 self._target_motor_rad -= self._motor_rad
                 self._base_target_motor_rad -= self._motor_rad
+                self._issued_motor_rad -= self._motor_rad
                 self._motor_rad = 0.0
+                self._motor_encoder_bias_rad = 0.0
             self._respond(command, sequence=sequence)
             return
 
@@ -434,6 +661,25 @@ class SimulatedTransport:
                 "pid_kd": self.pid_kd,
                 "pid_i_limit_motor_rad": self.pid_i_limit_motor_rad,
                 "pid_output_limit_motor_rad": self.pid_output_limit_motor_rad,
+                "velocity_pid_kp": self.velocity_pid_kp,
+                "velocity_pid_ki": self.velocity_pid_ki,
+                "velocity_pid_i_limit_motor_rad": self.velocity_pid_i_limit_motor_rad,
+                "torque_proxy_kp": self.torque_proxy_kp,
+                "torque_proxy_limit_rad": self.torque_proxy_limit_rad,
+                "torque_proxy_max_motor_velocity_rad_s": self.torque_proxy_max_motor_velocity_rad_s,
+                "torque_proxy_timeout_s": self.torque_proxy_timeout_s,
+                "missed_step_correction_enabled": self.missed_step_correction_enabled,
+                "missed_step_warn_motor_rad": self.missed_step_warn_motor_rad,
+                "missed_step_fault_motor_rad": self.missed_step_fault_motor_rad,
+                "missed_step_correction_rate": self.missed_step_correction_rate,
+                "current_control_enabled": self.current_control_enabled,
+                "idle_current_ma": self.idle_current_ma,
+                "hold_current_ma": self.hold_current_ma,
+                "run_current_ma": self.run_current_ma,
+                "current_downshift_delay_s": self.current_downshift_delay_s,
+                "autotune_max_amplitude_rad": self.autotune_max_amplitude_rad,
+                "autotune_max_duration_s": self.autotune_max_duration_s,
+                "autotune_max_deflection_rad": self.autotune_max_deflection_rad,
                 "backlash_motor_rad": self.backlash_motor_rad,
                 "backlash_comp_enabled": self.backlash_comp_enabled,
                 "resonance_frequency_hz": self.resonance_frequency_hz,
@@ -485,6 +731,69 @@ class SimulatedTransport:
                     elif key == "pid_output_limit_motor_rad":
                         number = self._config_number(value)
                         self.pid_output_limit_motor_rad = min(abs(number), 10.0) if math.isfinite(number) else 0.25
+                    elif key == "velocity_pid_kp":
+                        number = self._config_number(value)
+                        self.velocity_pid_kp = number if math.isfinite(number) and number >= 0.0 else 0.0
+                    elif key == "velocity_pid_ki":
+                        number = self._config_number(value)
+                        self.velocity_pid_ki = number if math.isfinite(number) and number >= 0.0 else 0.0
+                    elif key == "velocity_pid_i_limit_motor_rad":
+                        number = self._config_number(value)
+                        self.velocity_pid_i_limit_motor_rad = min(abs(number), 10.0) if math.isfinite(number) else 0.2
+                    elif key == "torque_proxy_kp":
+                        number = self._config_number(value)
+                        self.torque_proxy_kp = number if math.isfinite(number) and number >= 0.0 else 0.0
+                    elif key == "torque_proxy_limit_rad":
+                        number = self._config_number(value)
+                        self.torque_proxy_limit_rad = min(max(abs(number), 0.001), 10.0) if math.isfinite(number) else 0.12
+                    elif key == "torque_proxy_max_motor_velocity_rad_s":
+                        number = self._config_number(value)
+                        self.torque_proxy_max_motor_velocity_rad_s = (
+                            min(max(abs(number), 0.01), 100.0) if math.isfinite(number) else 4.0
+                        )
+                    elif key == "torque_proxy_timeout_s":
+                        number = self._config_number(value)
+                        self.torque_proxy_timeout_s = min(max(abs(number), 0.05), 120.0) if math.isfinite(number) else 3.0
+                    elif key == "missed_step_correction_enabled":
+                        if not isinstance(value, bool):
+                            self._respond(command, ResponseStatus.BAD_PARAM, sequence=sequence)
+                            return
+                        self.missed_step_correction_enabled = value
+                    elif key == "missed_step_warn_motor_rad":
+                        number = self._config_number(value)
+                        self.missed_step_warn_motor_rad = min(abs(number), 10.0) if math.isfinite(number) else 0.05
+                    elif key == "missed_step_fault_motor_rad":
+                        number = self._config_number(value)
+                        self.missed_step_fault_motor_rad = min(max(abs(number), 0.001), 10.0) if math.isfinite(number) else 0.25
+                    elif key == "missed_step_correction_rate":
+                        number = self._config_number(value)
+                        self.missed_step_correction_rate = min(max(number, 0.0), 1.0) if math.isfinite(number) else 0.25
+                    elif key == "current_control_enabled":
+                        if not isinstance(value, bool):
+                            self._respond(command, ResponseStatus.BAD_PARAM, sequence=sequence)
+                            return
+                        self.current_control_enabled = value
+                    elif key == "idle_current_ma":
+                        number = self._config_number(value)
+                        self.idle_current_ma = int(min(max(abs(number), 0.0), 2000.0)) if math.isfinite(number) else 0
+                    elif key == "hold_current_ma":
+                        number = self._config_number(value)
+                        self.hold_current_ma = int(min(max(abs(number), 0.0), 2000.0)) if math.isfinite(number) else 350
+                    elif key == "run_current_ma":
+                        number = self._config_number(value)
+                        self.run_current_ma = int(min(max(abs(number), 1.0), 2000.0)) if math.isfinite(number) else 1000
+                    elif key == "current_downshift_delay_s":
+                        number = self._config_number(value)
+                        self.current_downshift_delay_s = min(max(abs(number), 0.0), 30.0) if math.isfinite(number) else 0.5
+                    elif key == "autotune_max_amplitude_rad":
+                        number = self._config_number(value)
+                        self.autotune_max_amplitude_rad = min(max(abs(number), 0.001), 10.0) if math.isfinite(number) else 0.4
+                    elif key == "autotune_max_duration_s":
+                        number = self._config_number(value)
+                        self.autotune_max_duration_s = min(max(abs(number), 0.05), 120.0) if math.isfinite(number) else 15.0
+                    elif key == "autotune_max_deflection_rad":
+                        number = self._config_number(value)
+                        self.autotune_max_deflection_rad = min(max(abs(number), 0.001), 10.0) if math.isfinite(number) else 0.25
                     elif key == "backlash_motor_rad":
                         number = self._config_number(value)
                         self.backlash_motor_rad = min(abs(number), 10.0) if math.isfinite(number) else 0.0
@@ -543,6 +852,7 @@ class SimulatedTransport:
     def _reset_pid(self) -> None:
         self._pid_integral = 0.0
         self._pid_last_error = 0.0
+        self._velocity_integral = 0.0
 
     def _run(self) -> None:
         period = 1.0 / self.sample_hz
@@ -562,14 +872,16 @@ class SimulatedTransport:
 
     def _update_motion(self, dt: float) -> None:
         with self._lock:
-            if self._mode not in (ActuatorMode.CALIBRATION, ActuatorMode.POSITION) or self._fault_flags:
+            now = time.perf_counter()
+            if self._mode in (ActuatorMode.DISABLED, ActuatorMode.FAULT) or self._fault_flags:
                 self._motor_vel = 0.0
                 self._target_motor_rad = self._motor_rad
                 self._base_target_motor_rad = self._motor_rad
+                self._issued_motor_rad = self._motor_rad
                 self._chirp_active = False
             else:
                 if self._chirp_active:
-                    elapsed = time.perf_counter() - self._chirp_started_at
+                    elapsed = now - self._chirp_started_at
                     if elapsed >= self._chirp_duration_s:
                         self._chirp_active = False
                         self._base_target_motor_rad = self._motor_rad
@@ -610,18 +922,82 @@ class SimulatedTransport:
                         min(correction, self.pid_output_limit_motor_rad),
                     )
                     self._target_motor_rad = self._base_target_motor_rad + correction
+                elif self._mode == ActuatorMode.VELOCITY:
+                    target_motor_vel = self._velocity_target_output_rad_s / self.output_per_motor
+                    max_delta = self._move_accel * dt
+                    if self._motor_vel < target_motor_vel:
+                        self._motor_vel = min(target_motor_vel, self._motor_vel + max_delta)
+                    else:
+                        self._motor_vel = max(target_motor_vel, self._motor_vel - max_delta)
+                    self._motor_rad += self._motor_vel * dt
+                    self._issued_motor_rad = self._motor_rad
+                    self._target_motor_rad = self._motor_rad
+                    self._base_target_motor_rad = self._motor_rad
+                elif self._mode == ActuatorMode.TORQUE_PROXY:
+                    if now > self._torque_proxy_deadline:
+                        self._fault_flags |= FaultFlags.CONTROL_ERROR
+                        self._last_control_fault = "TORQUE_PROXY_TIMEOUT"
+                        self._mode = ActuatorMode.FAULT
+                        self._motor_vel = 0.0
+                    elif abs(self._motor_rad - self._torque_proxy_start_motor_rad) > self._torque_proxy_max_excursion:
+                        self._fault_flags |= FaultFlags.CONTROL_ERROR
+                        self._last_control_fault = "TORQUE_PROXY_EXCURSION"
+                        self._mode = ActuatorMode.FAULT
+                        self._motor_vel = 0.0
+                    else:
+                        error = self._torque_proxy_target_rad - self._torque_proxy_rad()
+                        target_motor_vel = -self.torque_proxy_kp * error
+                        target_motor_vel = max(
+                            -self._torque_proxy_max_velocity,
+                            min(target_motor_vel, self._torque_proxy_max_velocity),
+                        )
+                        max_delta = self._move_accel * dt
+                        if self._motor_vel < target_motor_vel:
+                            self._motor_vel = min(target_motor_vel, self._motor_vel + max_delta)
+                        else:
+                            self._motor_vel = max(target_motor_vel, self._motor_vel - max_delta)
+                        self._motor_rad += self._motor_vel * dt
+                        self._issued_motor_rad = self._motor_rad
+                        self._target_motor_rad = self._motor_rad
+                        self._base_target_motor_rad = self._motor_rad
                 elif not self._chirp_active:
                     self._target_motor_rad = self._base_target_motor_rad
 
-                error = self._target_motor_rad - self._motor_rad
-                max_step = self._move_velocity * dt
-                if abs(error) <= max_step:
-                    new_motor = self._target_motor_rad
-                    self._motor_vel = 0.0
-                else:
-                    new_motor = self._motor_rad + math.copysign(max_step, error)
-                    self._motor_vel = math.copysign(self._move_velocity, error)
-                self._motor_rad = new_motor
+                if self._mode in (ActuatorMode.CALIBRATION, ActuatorMode.POSITION):
+                    error = self._target_motor_rad - self._motor_rad
+                    desired_vel = 0.0 if abs(error) < 1e-9 else math.copysign(self._move_velocity, error)
+                    max_delta_vel = max(0.01, self._move_accel) * dt
+                    if self._motor_vel < desired_vel:
+                        self._motor_vel = min(desired_vel, self._motor_vel + max_delta_vel)
+                    else:
+                        self._motor_vel = max(desired_vel, self._motor_vel - max_delta_vel)
+                    max_step = abs(self._motor_vel) * dt
+                    if abs(error) <= max(max_step, 1e-9):
+                        self._motor_rad = self._target_motor_rad
+                        self._motor_vel = 0.0
+                    else:
+                        self._motor_rad += math.copysign(max_step, error)
+                    self._issued_motor_rad = self._motor_rad
+
+            if self._autotune_state == 1:
+                if abs(self._torque_proxy_rad()) > self.autotune_max_deflection_rad:
+                    self._autotune_state = 3
+                    self._fault_flags |= FaultFlags.AUTOTUNE_FAILED
+                    self._last_control_fault = "AUTOTUNE_DEFLECTION_LIMIT"
+                    self._mode = ActuatorMode.FAULT
+                elif now >= self._autotune_deadline:
+                    if self._autotune_loop_selector in (1, 3):
+                        self.velocity_pid_kp = max(0.05, self._move_velocity * 0.04)
+                        self.velocity_pid_ki = max(0.1, self.velocity_pid_kp * 8.0)
+                    if self._autotune_loop_selector in (2, 3):
+                        self.pid_enabled = True
+                        self.pid_kp = max(0.1, self._autotune_amplitude_rad * 3.0)
+                        self.pid_ki = max(0.01, self.pid_kp * 0.15)
+                        self.pid_kd = max(0.0, self.pid_kp * 0.01)
+                    self._autotune_state = 2
+                    self._last_control_fault = ""
+
+            self._update_motor_slip()
 
             target_output = self.output_per_motor * self._motor_rad + self.output_offset_rad
             if dt > 0 and self.resonance_frequency_hz is not None and self.resonance_frequency_hz > 0.0:
@@ -640,13 +1016,14 @@ class SimulatedTransport:
                 self._output_rad = new_output
             else:
                 self._output_vel = self.output_per_motor * self._motor_vel
+            self._update_current_command(now)
 
     def _emit_telemetry(self, now: float) -> None:
         with self._lock:
             self._telemetry_sequence = (self._telemetry_sequence + 1) & 0xFFFFFFFF
             motor_noise = self._rng.gauss(0.0, 0.00015)
             output_noise = self._rng.gauss(0.0, 0.00010)
-            motor_rad = self._motor_rad + motor_noise
+            motor_rad = self._measured_motor_rad() + motor_noise
             output_rad = self._output_rad + output_noise
             motor_enc_raw = int(round(motor_rad / (2 * math.pi) * 4096.0))
             output_enc_raw = int(round(output_rad / (2 * math.pi) * 4096.0))
@@ -661,11 +1038,17 @@ class SimulatedTransport:
                 output_rad=output_rad,
                 motor_vel_rad_s=self._motor_vel,
                 output_vel_rad_s=self._output_vel,
-                driver_current=0.7 + 0.08 * abs(self._motor_vel),
+                driver_current=self._commanded_current_a,
                 bus_voltage=24.0,
                 temperature=32.0 + 0.3 * abs(self._motor_vel),
                 fault_flags=int(self._fault_flags),
                 mode=int(self._mode),
+                output_target_rad=self._output_target_rad,
+                torque_proxy_rad=self._torque_proxy_rad(),
+                motor_slip_rad=self._motor_slip_rad,
+                commanded_current=self._commanded_current_a,
+                control_state=self._autotune_state,
+                telemetry_schema_version=2,
             )
             frame_seq = self._telemetry_sequence & 0xFFFF
         self._enqueue_frame(PacketType.TELEMETRY, encode_telemetry_payload(payload), sequence=frame_seq)
@@ -864,6 +1247,81 @@ class ActuatorClient:
             pack_move_output_rel_payload(float(delta_rad), velocity, accel),
             timeout=timeout,
         )
+
+    def set_position_target(
+        self,
+        target_output_rad: float,
+        velocity_rad_s: float,
+        accel_rad_s2: float,
+        *,
+        relative: bool = False,
+        timeout: float = 1.0,
+    ) -> None:
+        velocity = max(0.01, min(abs(float(velocity_rad_s)), self.max_velocity_rad_s))
+        accel = max(0.01, min(abs(float(accel_rad_s2)), self.max_accel_rad_s2))
+        self.command(
+            CommandID.SET_POSITION_TARGET,
+            pack_position_target_payload(float(target_output_rad), velocity, accel, relative=relative),
+            timeout=timeout,
+        )
+
+    def set_velocity_target(
+        self,
+        output_velocity_rad_s: float,
+        accel_rad_s2: float,
+        timeout: float = 1.0,
+    ) -> None:
+        velocity = max(-self.max_velocity_rad_s, min(float(output_velocity_rad_s), self.max_velocity_rad_s))
+        accel = max(0.01, min(abs(float(accel_rad_s2)), self.max_accel_rad_s2))
+        self.command(
+            CommandID.SET_VELOCITY_TARGET,
+            pack_velocity_target_payload(velocity, accel),
+            timeout=timeout,
+        )
+
+    def set_torque_proxy_target(
+        self,
+        target_deflection_rad: float,
+        max_motor_velocity_rad_s: float,
+        max_motor_excursion_rad: float,
+        timeout_s: float,
+        timeout: float = 1.0,
+    ) -> None:
+        self.command(
+            CommandID.SET_TORQUE_PROXY_TARGET,
+            pack_torque_proxy_target_payload(
+                target_deflection_rad,
+                max_motor_velocity_rad_s,
+                max_motor_excursion_rad,
+                timeout_s,
+            ),
+            timeout=timeout,
+        )
+
+    def autotune_control(
+        self,
+        loop_selector: int,
+        amplitude_rad: float,
+        max_velocity_rad_s: float,
+        duration_s: float,
+        max_deflection_rad: float,
+        timeout: float = 1.0,
+    ) -> None:
+        self.command(
+            CommandID.AUTOTUNE_CONTROL,
+            pack_autotune_control_payload(
+                loop_selector,
+                amplitude_rad,
+                max_velocity_rad_s,
+                duration_s,
+                max_deflection_rad,
+            ),
+            timeout=timeout,
+        )
+
+    def get_control_status(self, timeout: float = 1.0) -> dict:
+        response = self.command(CommandID.GET_CONTROL_STATUS, timeout=timeout)
+        return json.loads(response.data.decode("utf-8"))
 
     def start_chirp(
         self,

@@ -50,6 +50,12 @@ class TelemetrySample:
     temperature: float
     fault_flags: int
     mode: int
+    output_target_rad: float = 0.0
+    torque_proxy_rad: float = 0.0
+    motor_slip_rad: float = 0.0
+    commanded_current: float = 0.0
+    control_state: int = 0
+    telemetry_schema_version: int = 1
     pc_time_s: float = field(default_factory=time.time)
     sample_index: int = 0
 
@@ -73,6 +79,12 @@ class TelemetrySample:
             temperature=float(payload.temperature),
             fault_flags=int(payload.fault_flags),
             mode=int(payload.mode),
+            output_target_rad=float(payload.output_target_rad),
+            torque_proxy_rad=float(payload.torque_proxy_rad),
+            motor_slip_rad=float(payload.motor_slip_rad),
+            commanded_current=float(payload.commanded_current),
+            control_state=int(payload.control_state),
+            telemetry_schema_version=int(payload.telemetry_schema_version),
             pc_time_s=time.time() if pc_time_s is None else float(pc_time_s),
         )
 
@@ -114,6 +126,12 @@ class TelemetrySample:
             "fault_flags": self.fault_flags,
             "mode": self.mode,
             "mode_name": self.mode_name,
+            "output_target_rad": self.output_target_rad,
+            "torque_proxy_rad": self.torque_proxy_rad,
+            "motor_slip_rad": self.motor_slip_rad,
+            "commanded_current": self.commanded_current,
+            "control_state": self.control_state,
+            "telemetry_schema_version": self.telemetry_schema_version,
         }
 
 

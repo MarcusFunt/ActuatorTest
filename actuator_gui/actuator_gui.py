@@ -1933,7 +1933,6 @@ def _start_bokeh() -> None:
 
 
 app = rx.App(
-    theme=rx.theme(appearance="dark", accent_color="blue", radius="small"),
     stylesheets=[
         "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
     ],

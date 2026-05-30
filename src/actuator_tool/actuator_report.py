@@ -39,6 +39,12 @@ RAW_FIELDNAMES = [
     "fault_flags",
     "mode",
     "mode_name",
+    "output_target_rad",
+    "torque_proxy_rad",
+    "motor_slip_rad",
+    "commanded_current",
+    "control_state",
+    "telemetry_schema_version",
 ]
 
 

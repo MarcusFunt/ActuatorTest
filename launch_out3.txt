@@ -1,0 +1,13 @@
+Warning: `reflex_base.plugins.sitemap.SitemapPlugin` plugin is enabled by 
+default, but not explicitly added to the config. If you want to use it, please 
+add it to the `plugins` list in your config inside of `rxconfig.py`. To disable
+this plugin, add `SitemapPlugin` to the `disable_plugins` list.
+Warning: Windows Subsystem for Linux (WSL) is recommended for improving initial
+install times.
+Warning: `reflex_base.plugins.sitemap.SitemapPlugin` plugin is enabled by 
+default, but not explicitly added to the config. If you want to use it, please 
+add it to the `plugins` list in your config inside of `rxconfig.py`. To disable
+this plugin, add `SitemapPlugin` to the `disable_plugins` list.
+----------------------------- Starting Reflex App -----------------------------
+Warning: Unable to bind to :3001 due to: [WinError 10048] Only one usage of 
+each socket address (protocol/network address/port) is normally permitted.

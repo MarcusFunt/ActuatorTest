@@ -1,0 +1,153 @@
+- generic [active] [ref=e1]:
+  - region "Notifications alt+T"
+  - generic [ref=e2]:
+    - generic "Connection Error:"
+    - generic [ref=e3]:
+      - generic [ref=e5]:
+        - generic [ref=e6]:
+          - img [ref=e7]
+          - paragraph [ref=e10]: Actuator Bench
+        - generic [ref=e12]:
+          - paragraph [ref=e15]: Connected
+          - generic [ref=e16]: sim_actuator_001
+          - generic [ref=e17]: sim-0.1.0
+          - generic [ref=e18]: sim_rev_a
+        - generic [ref=e20]:
+          - generic [ref=e21]: DISABLED
+          - generic [ref=e22]: NONE
+        - paragraph [ref=e23]: Connected to sim_actuator_001
+        - button "ESTOP" [ref=e156] [cursor=pointer]:
+          - img [ref=e157]
+          - generic [ref=e159]: ESTOP
+      - generic [ref=e24]:
+        - generic [ref=e25]:
+          - button "Controls" [ref=e26] [cursor=pointer]:
+            - paragraph [ref=e27]: Controls
+            - img [ref=e29]
+          - generic [ref=e31]:
+            - paragraph [ref=e32]: Connection
+            - generic [ref=e33]:
+              - generic [ref=e35]:
+                - checkbox "Simulator" [checked] [ref=e36] [cursor=pointer]:
+                  - img
+                - text: Simulator
+              - button "Scan" [ref=e37] [cursor=pointer]
+            - combobox [ref=e38]:
+              - generic [ref=e39]: Select serial port...
+              - img [ref=e40]
+            - generic [ref=e42]:
+              - button "Connect" [disabled]
+              - button "Disconnect" [ref=e160] [cursor=pointer]
+          - generic [ref=e44]:
+            - paragraph [ref=e45]: Mode
+            - generic [ref=e46]:
+              - button "DISABLED" [ref=e47] [cursor=pointer]
+              - button "CALIBRATION" [ref=e48] [cursor=pointer]
+          - generic [ref=e49]:
+            - paragraph [ref=e50]: Jog
+            - generic [ref=e51]:
+              - button "-" [disabled] [ref=e52] [cursor=pointer]
+              - generic [ref=e53]:
+                - paragraph [ref=e54]: Step (rad)
+                - textbox [ref=e56]: "0.25"
+              - button "+" [disabled] [ref=e57] [cursor=pointer]
+            - paragraph [ref=e58]: Move Relative
+            - paragraph [ref=e59]: Delta (rad)
+            - textbox [ref=e61]: "1"
+            - paragraph [ref=e63]: Velocity (rad/s)
+            - textbox [ref=e65]: "3.5"
+            - paragraph [ref=e67]: Accel (rad/s2)
+            - textbox [ref=e69]: "80"
+            - generic [ref=e70]:
+              - button "Move Relative" [disabled]
+          - generic [ref=e71]:
+            - paragraph [ref=e72]: Encoders
+            - generic [ref=e73]:
+              - button "Zero Motor" [disabled]
+              - button "Zero Output" [disabled]
+          - generic [ref=e74]:
+            - paragraph [ref=e75]: Safety
+            - button "Stop" [ref=e161] [cursor=pointer]
+        - generic [ref=e76]:
+          - generic [ref=e77]:
+            - button "Overview" [ref=e78] [cursor=pointer]
+            - button "Tests" [ref=e79] [cursor=pointer]
+            - button "Config" [ref=e80] [cursor=pointer]
+            - button "Report" [ref=e81] [cursor=pointer]
+            - button "Log" [ref=e82] [cursor=pointer]
+          - generic [ref=e84]:
+            - generic [ref=e85]:
+              - generic [ref=e86]:
+                - paragraph [ref=e87]: Motor Angle
+                - paragraph [ref=e88]: "0.0002"
+                - paragraph [ref=e89]: rad
+              - generic [ref=e90]:
+                - paragraph [ref=e91]: Output Angle
+                - paragraph [ref=e92]: "0.0133"
+                - paragraph [ref=e93]: rad
+              - generic [ref=e94]:
+                - paragraph [ref=e95]: Deflection
+                - paragraph [ref=e96]: "0.0000"
+                - paragraph [ref=e97]: rad
+              - generic [ref=e98]:
+                - paragraph [ref=e99]: Motor Velocity
+                - paragraph [ref=e100]: "0.000"
+                - paragraph [ref=e101]: rad/s
+              - generic [ref=e102]:
+                - paragraph [ref=e103]: Bus Voltage
+                - paragraph [ref=e104]: "24.0"
+                - paragraph [ref=e105]: V
+              - generic [ref=e106]:
+                - paragraph [ref=e107]: Temperature
+                - paragraph [ref=e108]: "32.0"
+                - paragraph [ref=e109]: C
+            - generic [ref=e110]:
+              - generic [ref=e112]:
+                - paragraph [ref=e113]: Live Telemetry
+                - iframe [ref=e114]:
+                  - generic [ref=f1e3]:
+                    - generic [ref=f1e12]:
+                      - generic [ref=f1e15]: motor
+                      - generic [ref=f1e18]: output
+                      - generic [ref=f1e21]: predicted
+                    - generic [ref=f1e37]:
+                      - generic [ref=f1e40]: motor vel
+                      - generic [ref=f1e43]: output vel
+                    - generic [ref=f1e52]:
+                      - generic [ref=f1e55]: cmd pos
+                      - generic [ref=f1e58]: measured pos
+              - generic [ref=e115]:
+                - generic [ref=e116]:
+                  - paragraph [ref=e117]: Actuator Diagram
+                  - img [ref=e118]:
+                    - generic [ref=e123]: Motor
+                    - generic [ref=e124]: 0.0002 rad
+                    - generic [ref=e127]: Output
+                    - generic [ref=e128]: 0.0133 rad
+                    - generic [ref=e129]: Delta +0.0000 rad
+                - generic [ref=e130]:
+                  - paragraph [ref=e131]: Calibration Results
+                  - generic [ref=e132]:
+                    - paragraph [ref=e133]: Ratio
+                    - paragraph [ref=e134]: "0.25000000"
+                  - generic [ref=e135]:
+                    - paragraph [ref=e136]: Offset
+                    - paragraph [ref=e137]: 0.01320000 rad
+                  - generic [ref=e138]:
+                    - paragraph [ref=e139]: Fit RMS
+                    - paragraph [ref=e140]: "-"
+                  - generic [ref=e141]:
+                    - paragraph [ref=e142]: Hysteresis
+                    - paragraph [ref=e143]: 0.00000000 rad
+                  - generic [ref=e144]:
+                    - paragraph [ref=e145]: Resonance
+                    - paragraph [ref=e146]: "-"
+                  - generic [ref=e147]:
+                    - paragraph [ref=e148]: Backlash
+                    - paragraph [ref=e149]: 0.00000000 rad
+                  - generic [ref=e150]:
+                    - paragraph [ref=e151]: Samples
+                    - paragraph [ref=e152]: "69"
+                  - generic [ref=e153]:
+                    - paragraph [ref=e154]: Dropped
+                    - paragraph [ref=e155]: "0"

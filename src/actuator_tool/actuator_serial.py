@@ -148,7 +148,7 @@ class SimulatedTransport:
         *,
         output_per_motor: float = 0.25,
         output_offset_rad: float = 0.0132,
-        sample_hz: float = 100.0,
+        sample_hz: float = 250.0,
         resonance_frequency_hz: float | None = None,
         resonance_damping_ratio: float = 0.05,
     ) -> None:
@@ -187,7 +187,7 @@ class SimulatedTransport:
         self._chirp_center_motor_rad = 0.0
         self._chirp_amplitude_rad = 0.18
         self._chirp_start_hz = 0.8
-        self._chirp_end_hz = 75.0
+        self._chirp_end_hz = 70.0
         self._chirp_duration_s = 12.0
         self._chirp_max_deflection_rad = 0.25
         self.pid_enabled = False
@@ -590,8 +590,8 @@ class SimulatedTransport:
                     self._respond(command, ResponseStatus.BAD_MODE, sequence=sequence)
                     return
                 amplitude = max(0.001, min(abs(float(amplitude)), 0.5))
-                start_hz = max(0.05, min(abs(float(start_hz)), 45.0))
-                end_hz = max(start_hz, min(abs(float(end_hz)), 45.0))
+                start_hz = max(0.05, min(abs(float(start_hz)), 70.0))
+                end_hz = max(start_hz, min(abs(float(end_hz)), 70.0))
                 duration_s = max(1.0, min(abs(float(duration_s)), 120.0))
                 self._chirp_center_motor_rad = self._motor_rad
                 self._chirp_amplitude_rad = amplitude
@@ -1327,7 +1327,7 @@ class ActuatorClient:
         self,
         amplitude_rad: float = 0.18,
         start_frequency_hz: float = 0.8,
-        end_frequency_hz: float = 75.0,
+        end_frequency_hz: float = 70.0,
         duration_s: float = 12.0,
         max_deflection_rad: float = 0.25,
         timeout: float = 1.0,

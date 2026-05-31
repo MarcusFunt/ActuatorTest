@@ -463,7 +463,7 @@ static uint32_t chirpStartUs = 0;
 static float chirpCenterMotorRad = 0.0f;
 static float chirpAmplitudeRad = 0.18f;
 static float chirpStartHz = 0.8f;
-static float chirpEndHz = 75.0f;
+static float chirpEndHz = 70.0f;
 static float chirpDurationS = 12.0f;
 static float chirpMaxDeflectionRad = 0.25f;
 
@@ -2105,8 +2105,8 @@ static void handleStartChirp(const uint8_t *payload, uint16_t len, uint16_t sequ
   }
 
   chirpAmplitudeRad = clampFloat(fabsf(amplitudeRad), 0.001f, 0.5f);
-  chirpStartHz = clampFloat(fabsf(startHz), 0.05f, 75.0f);
-  chirpEndHz = clampFloat(fabsf(endHz), chirpStartHz, 75.0f);
+  chirpStartHz = clampFloat(fabsf(startHz), 0.05f, 70.0f);
+  chirpEndHz = clampFloat(fabsf(endHz), chirpStartHz, 70.0f);
   chirpDurationS = clampFloat(fabsf(durationS), 1.0f, 120.0f);
   chirpMaxDeflectionRad = clampFloat(fabsf(maxDeflectionRad), 0.001f, 1.0f);
   chirpCenterMotorRad = (float)readCurrentStepPosition() * MOTOR_RAD_PER_MICROSTEP;

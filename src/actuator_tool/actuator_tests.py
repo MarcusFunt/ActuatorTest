@@ -7,6 +7,7 @@ configuration objects, then return structured results that any frontend can disp
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 import time
 from typing import Callable
 
@@ -215,7 +216,7 @@ def run_ratio_calibration(
     actuator_info: ActuatorInfo | None = None,
     safety: SafetyLimits | None = None,
     progress: ProgressCallback | None = None,
-    motor_sweep_rad: float = 8.0,
+    motor_sweep_rad: float = 8.0 * math.pi,
     residual_threshold_rad: float = 0.03,
 ) -> RatioCalibrationResult:
     limits = safety or SafetyLimits()
@@ -281,13 +282,10 @@ def run_resonance_test(
     *,
     amplitude_rad: float = 0.18,
     start_frequency_hz: float = 0.8,
-    end_frequency_hz: float = 75.0,
+    end_frequency_hz: float = 70.0,
     duration_s: float = 12.0,
     max_deflection_rad: float = 0.25,
 ) -> ResonanceTestResult:
-    import math
-    import numpy as _np
-
     limits = safety or SafetyLimits()
     limits.validate()
     if abs(calibration.output_per_motor) < 1e-9:
@@ -299,40 +297,22 @@ def run_resonance_test(
     _abort_on_faults(client)
     start_index = store.total_samples
 
-    # Drive sinusoidal back-and-forth oscillation from Python at log-spaced frequencies.
-    # The firmware chirp command does not produce the required rocking motion on real
-    # hardware, so we implement it here with repeated move_rel calls.
     amplitude = abs(limits.clamp_delta(amplitude_rad))
     f_min = max(start_frequency_hz, 0.5)
-    f_max = min(end_frequency_hz, 12.0)    # cap at 12 Hz — practical limit for software timing
-    n_steps  = 10
-    n_cycles = 4
-    _LATENCY_S = 0.020                     # serial round-trip allowance per command
+    f_max = min(max(end_frequency_hz, f_min), 70.0)
+    duration = max(1.0, float(duration_s))
 
-    frequencies = _np.logspace(_np.log10(f_min), _np.log10(f_max), n_steps).tolist()
-    _progress(progress, f"Oscillation sweep {f_min:.1f}–{f_max:.1f} Hz ({n_steps} steps, {n_cycles} cycles each)")
+    _progress(progress, f"Firmware chirp {f_min:.1f}-{f_max:.1f} Hz for {duration:.1f} s")
 
-    last_vel   = limits.clamp_velocity(amplitude * 2 * math.pi * f_min * 1.5)
-    last_accel = limits.clamp_accel(last_vel / 0.04)
-
-    for freq in frequencies:
-        half_period = 0.5 / freq
-        vel   = limits.clamp_velocity(amplitude * 2 * math.pi * freq * 1.5)
-        accel = limits.clamp_accel(vel / 0.04)
-        last_vel, last_accel = vel, accel
-        _progress(progress, f"Resonance sweep: {freq:.1f} Hz")
-        for _ in range(n_cycles):
-            client.move_rel(+amplitude * 2, vel, accel)
-            time.sleep(max(half_period - _LATENCY_S, _LATENCY_S))
-            client.move_rel(-amplitude * 2, vel, accel)
-            time.sleep(max(half_period - _LATENCY_S, _LATENCY_S))
-        _abort_on_faults(client)
-
-    # Return to centre (undo the last half-swing which left motor at –amplitude)
-    client.move_rel(+amplitude, last_vel, last_accel)
-    time.sleep(0.3)
+    client.start_chirp(
+        amplitude_rad=amplitude,
+        start_frequency_hz=f_min,
+        end_frequency_hz=f_max,
+        duration_s=duration,
+        max_deflection_rad=max_deflection_rad,
+    )
+    samples = _wait_after_move(client, store, start_index, duration + 0.5)
     client.stop()
-    samples = store.samples_since(start_index)
 
     if len(samples) < 64:
         raise ActuatorError("not enough telemetry for resonance analysis")
@@ -390,7 +370,7 @@ def run_step_response_test(
     *,
     calibration: CalibrationConfig | None = None,
     step_rad: float = 0.25,
-    settle_capture_s: float = 4.0,
+    settle_capture_s: float = 10.0,
 ) -> StepResponseResult:
     limits = safety or SafetyLimits()
     limits.validate()

@@ -1,4 +1,5 @@
 import inspect
+import math
 import time
 
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from actuator_tool.actuator_data import TelemetryStore
 from actuator_tool.actuator_protocol import ActuatorMode, CommandID, FaultFlags, ResponseStatus
 from actuator_tool.actuator_serial import ActuatorClient, ActuatorCommandError, CommandResponse, SimulatedTransport
-from actuator_tool.actuator_tests import run_ratio_calibration, run_resonance_test
+from actuator_tool.actuator_tests import run_ratio_calibration, run_resonance_test, run_step_response_test
 from actuator_tool.config_schema import SafetyLimits
 
 
@@ -35,11 +36,19 @@ def test_resonance_defaults_are_aggressive():
 
     assert runner_defaults["amplitude_rad"].default >= 0.18
     assert runner_defaults["start_frequency_hz"].default <= 0.8
-    assert runner_defaults["end_frequency_hz"].default == 75.0
+    assert runner_defaults["end_frequency_hz"].default == 70.0
     assert runner_defaults["duration_s"].default <= 12.0
     assert runner_defaults["max_deflection_rad"].default >= 0.25
     assert client_defaults["amplitude_rad"].default == runner_defaults["amplitude_rad"].default
     assert client_defaults["end_frequency_hz"].default == runner_defaults["end_frequency_hz"].default
+
+
+def test_characterization_defaults_match_production_targets():
+    ratio_defaults = inspect.signature(run_ratio_calibration).parameters
+    step_defaults = inspect.signature(run_step_response_test).parameters
+
+    assert ratio_defaults["motor_sweep_rad"].default == pytest.approx(8.0 * math.pi)
+    assert step_defaults["settle_capture_s"].default == 10.0
 
 
 def test_simulator_connection_and_motion_flow():

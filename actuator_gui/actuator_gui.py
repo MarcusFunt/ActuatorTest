@@ -131,6 +131,7 @@ _REPORT_ROOT = Path(
         str(Path.home() / "Documents" / "ActuatorBenchReports"),
     )
 )
+AUTOTUNE_LOOP_OPTIONS = ["Both", "Velocity", "Position"]
 
 
 def _new_report() -> SessionReport:
@@ -169,6 +170,35 @@ def _format_config_number(value: float | int | None, digits: int = 6) -> str:
     if not math.isfinite(number):
         return ""
     return f"{number:.{digits}f}".rstrip("0").rstrip(".")
+
+
+def _parse_int(value: str, label: str) -> int:
+    return int(round(_parse_float(value, label)))
+
+
+def _format_control_status(status: dict[str, Any]) -> str:
+    def _num(key: str, digits: int = 4, default: str = "-") -> str:
+        value = status.get(key)
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(number):
+            return default
+        return f"{number:.{digits}f}"
+
+    return (
+        f"mode={status.get('mode_name', '-')}; "
+        f"target={_num('target_output_rad')} rad; "
+        f"velocity={_num('velocity_target_output_rad_s', 3)} rad/s; "
+        f"deflection={_num('torque_proxy_rad')} rad; "
+        f"slip={_num('motor_slip_rad')} rad; "
+        f"current={_num('commanded_current_a', 3)} A; "
+        f"autotune={status.get('autotune_state', '-')}; "
+        f"fault={status.get('last_control_fault') or 'none'}"
+    )
 
 
 def _sync_calibration_from_config(ctx: BackendCtx, cfg: dict[str, Any]) -> None:
@@ -276,6 +306,25 @@ def _apply_ui_config(
     cal.pid_kd = cal_values["pid_kd"]
     cal.pid_i_limit_motor_rad = cal_values["pid_i_limit_motor_rad"]
     cal.pid_output_limit_motor_rad = cal_values["pid_output_limit_motor_rad"]
+    cal.velocity_pid_kp = cal_values["velocity_pid_kp"]
+    cal.velocity_pid_ki = cal_values["velocity_pid_ki"]
+    cal.velocity_pid_i_limit_motor_rad = cal_values["velocity_pid_i_limit_motor_rad"]
+    cal.torque_proxy_kp = cal_values["torque_proxy_kp"]
+    cal.torque_proxy_limit_rad = cal_values["torque_proxy_limit_rad"]
+    cal.torque_proxy_max_motor_velocity_rad_s = cal_values["torque_proxy_max_motor_velocity_rad_s"]
+    cal.torque_proxy_timeout_s = cal_values["torque_proxy_timeout_s"]
+    cal.missed_step_correction_enabled = cal_values["missed_step_correction_enabled"]
+    cal.missed_step_warn_motor_rad = cal_values["missed_step_warn_motor_rad"]
+    cal.missed_step_fault_motor_rad = cal_values["missed_step_fault_motor_rad"]
+    cal.missed_step_correction_rate = cal_values["missed_step_correction_rate"]
+    cal.current_control_enabled = cal_values["current_control_enabled"]
+    cal.idle_current_ma = cal_values["idle_current_ma"]
+    cal.hold_current_ma = cal_values["hold_current_ma"]
+    cal.run_current_ma = cal_values["run_current_ma"]
+    cal.current_downshift_delay_s = cal_values["current_downshift_delay_s"]
+    cal.autotune_max_amplitude_rad = cal_values["autotune_max_amplitude_rad"]
+    cal.autotune_max_duration_s = cal_values["autotune_max_duration_s"]
+    cal.autotune_max_deflection_rad = cal_values["autotune_max_deflection_rad"]
     cal.backlash_motor_rad = cal_values["backlash_motor_rad"]
     cal.backlash_comp_enabled = cal_values["backlash_comp_enabled"]
     cal.resonance_frequency_hz = cal_values["resonance_frequency_hz"]
@@ -619,6 +668,11 @@ class State(rx.State):
     motor_angle_str: str = "-"
     output_angle_str: str = "-"
     deflection_str: str = "-"
+    output_target_str: str = "-"
+    torque_proxy_str: str = "-"
+    motor_slip_str: str = "-"
+    commanded_current_str: str = "-"
+    control_state_str: str = "-"
     motor_velocity_str: str = "-"
     bus_voltage_str: str = "-"
     temperature_str: str = "-"
@@ -626,6 +680,8 @@ class State(rx.State):
     diag_motor_y: str = "51"
     diag_output_x: str = "224"
     diag_output_y: str = "39"
+    diag_motor_radius: str = "34"
+    diag_output_radius: str = "46"
     diag_motor_label: str = "0.0000 rad"
     diag_output_label: str = "0.0000 rad"
     diag_deflection_label: str = "Delta +0.0000 rad"
@@ -646,6 +702,21 @@ class State(rx.State):
     move_delta: float = 1.0
     move_velocity: float = 1.2
     move_accel: float = 10.0
+    position_target: float = 0.0
+    position_velocity: float = 1.2
+    position_accel: float = 10.0
+    velocity_target: float = 0.0
+    velocity_accel: float = 10.0
+    torque_proxy_target: float = 0.02
+    torque_proxy_max_velocity: float = 2.0
+    torque_proxy_max_excursion: float = 0.75
+    torque_proxy_timeout: float = 3.0
+    autotune_loop_selector: str = "Both"
+    autotune_amplitude: float = 0.05
+    autotune_max_velocity: float = 1.2
+    autotune_duration: float = 3.0
+    autotune_max_deflection: float = 0.12
+    control_status_text: str = "No control status read yet"
 
     # Config tab
     cfg_max_velocity: str = "40"
@@ -663,6 +734,25 @@ class State(rx.State):
     cfg_pid_kd: str = "0"
     cfg_pid_i_limit: str = "0.05"
     cfg_pid_output_limit: str = "0.25"
+    cfg_velocity_pid_kp: str = "0.2"
+    cfg_velocity_pid_ki: str = "2"
+    cfg_velocity_pid_i_limit: str = "0.2"
+    cfg_torque_proxy_kp: str = "3"
+    cfg_torque_proxy_limit: str = "0.12"
+    cfg_torque_proxy_max_velocity: str = "4"
+    cfg_torque_proxy_timeout: str = "3"
+    cfg_missed_step_correction_enabled: bool = True
+    cfg_missed_step_warn: str = "0.05"
+    cfg_missed_step_fault: str = "0.25"
+    cfg_missed_step_rate: str = "0.25"
+    cfg_current_control_enabled: bool = True
+    cfg_idle_current_ma: str = "0"
+    cfg_hold_current_ma: str = "350"
+    cfg_run_current_ma: str = "1000"
+    cfg_current_downshift_delay: str = "0.5"
+    cfg_autotune_max_amplitude: str = "0.4"
+    cfg_autotune_max_duration: str = "15"
+    cfg_autotune_max_deflection: str = "0.25"
     cfg_backlash_motor: str = "0"
     cfg_backlash_comp_enabled: bool = False
     cfg_resonance_derating_enabled: bool = False
@@ -706,6 +796,22 @@ class State(rx.State):
     @rx.var
     def can_test(self) -> bool:
         return self.connected and self.mode_name == "CALIBRATION" and not self.busy
+
+    @rx.var
+    def can_position(self) -> bool:
+        return self.connected and self.mode_name == "POSITION" and not self.busy
+
+    @rx.var
+    def can_velocity(self) -> bool:
+        return self.connected and self.mode_name == "VELOCITY" and not self.busy
+
+    @rx.var
+    def can_torque_proxy(self) -> bool:
+        return self.connected and self.mode_name == "TORQUE_PROXY" and not self.busy
+
+    @rx.var
+    def can_autotune(self) -> bool:
+        return self.connected and self.mode_name in ("POSITION", "VELOCITY") and not self.busy
 
     @rx.var
     def visible_log_entries(self) -> list[dict[str, str]]:
@@ -772,6 +878,87 @@ class State(rx.State):
         except ValueError:
             pass
 
+    def set_position_target(self, v: str) -> None:
+        try:
+            self.position_target = float(v)
+        except ValueError:
+            pass
+
+    def set_position_velocity(self, v: str) -> None:
+        try:
+            self.position_velocity = float(v)
+        except ValueError:
+            pass
+
+    def set_position_accel(self, v: str) -> None:
+        try:
+            self.position_accel = float(v)
+        except ValueError:
+            pass
+
+    def set_velocity_target(self, v: str) -> None:
+        try:
+            self.velocity_target = float(v)
+        except ValueError:
+            pass
+
+    def set_velocity_accel(self, v: str) -> None:
+        try:
+            self.velocity_accel = float(v)
+        except ValueError:
+            pass
+
+    def set_torque_proxy_target(self, v: str) -> None:
+        try:
+            self.torque_proxy_target = float(v)
+        except ValueError:
+            pass
+
+    def set_torque_proxy_max_velocity(self, v: str) -> None:
+        try:
+            self.torque_proxy_max_velocity = float(v)
+        except ValueError:
+            pass
+
+    def set_torque_proxy_max_excursion(self, v: str) -> None:
+        try:
+            self.torque_proxy_max_excursion = float(v)
+        except ValueError:
+            pass
+
+    def set_torque_proxy_timeout(self, v: str) -> None:
+        try:
+            self.torque_proxy_timeout = float(v)
+        except ValueError:
+            pass
+
+    def set_autotune_loop_selector(self, v: str) -> None:
+        self.autotune_loop_selector = v
+
+    def set_autotune_amplitude(self, v: str) -> None:
+        try:
+            self.autotune_amplitude = float(v)
+        except ValueError:
+            pass
+
+    def set_autotune_max_velocity(self, v: str) -> None:
+        try:
+            self.autotune_max_velocity = float(v)
+        except ValueError:
+            pass
+
+    def set_autotune_duration(self, v: str) -> None:
+        try:
+            self.autotune_duration = float(v)
+        except ValueError:
+            pass
+
+    def set_autotune_max_deflection(self, v: str) -> None:
+        try:
+            self.autotune_max_deflection = float(v)
+        except ValueError:
+            pass
+
     def set_cfg_max_velocity(self, v: str) -> None:
         self.cfg_max_velocity = v
 
@@ -818,6 +1005,57 @@ class State(rx.State):
     def set_cfg_pid_output_limit(self, v: str) -> None:
         self.cfg_pid_output_limit = v
 
+    def set_cfg_velocity_pid_kp(self, v: str) -> None:
+        self.cfg_velocity_pid_kp = v
+
+    def set_cfg_velocity_pid_ki(self, v: str) -> None:
+        self.cfg_velocity_pid_ki = v
+
+    def set_cfg_velocity_pid_i_limit(self, v: str) -> None:
+        self.cfg_velocity_pid_i_limit = v
+
+    def set_cfg_torque_proxy_kp(self, v: str) -> None:
+        self.cfg_torque_proxy_kp = v
+
+    def set_cfg_torque_proxy_limit(self, v: str) -> None:
+        self.cfg_torque_proxy_limit = v
+
+    def set_cfg_torque_proxy_max_velocity(self, v: str) -> None:
+        self.cfg_torque_proxy_max_velocity = v
+
+    def set_cfg_torque_proxy_timeout(self, v: str) -> None:
+        self.cfg_torque_proxy_timeout = v
+
+    def set_cfg_missed_step_warn(self, v: str) -> None:
+        self.cfg_missed_step_warn = v
+
+    def set_cfg_missed_step_fault(self, v: str) -> None:
+        self.cfg_missed_step_fault = v
+
+    def set_cfg_missed_step_rate(self, v: str) -> None:
+        self.cfg_missed_step_rate = v
+
+    def set_cfg_idle_current_ma(self, v: str) -> None:
+        self.cfg_idle_current_ma = v
+
+    def set_cfg_hold_current_ma(self, v: str) -> None:
+        self.cfg_hold_current_ma = v
+
+    def set_cfg_run_current_ma(self, v: str) -> None:
+        self.cfg_run_current_ma = v
+
+    def set_cfg_current_downshift_delay(self, v: str) -> None:
+        self.cfg_current_downshift_delay = v
+
+    def set_cfg_autotune_max_amplitude(self, v: str) -> None:
+        self.cfg_autotune_max_amplitude = v
+
+    def set_cfg_autotune_max_duration(self, v: str) -> None:
+        self.cfg_autotune_max_duration = v
+
+    def set_cfg_autotune_max_deflection(self, v: str) -> None:
+        self.cfg_autotune_max_deflection = v
+
     def set_cfg_backlash_motor(self, v: str) -> None:
         self.cfg_backlash_motor = v
 
@@ -826,6 +1064,18 @@ class State(rx.State):
 
     def disable_pid(self) -> None:
         self.cfg_pid_enabled = False
+
+    def enable_missed_step_correction(self) -> None:
+        self.cfg_missed_step_correction_enabled = True
+
+    def disable_missed_step_correction(self) -> None:
+        self.cfg_missed_step_correction_enabled = False
+
+    def enable_current_control(self) -> None:
+        self.cfg_current_control_enabled = True
+
+    def disable_current_control(self) -> None:
+        self.cfg_current_control_enabled = False
 
     def enable_backlash_comp(self) -> None:
         self.cfg_backlash_comp_enabled = True
@@ -859,6 +1109,7 @@ class State(rx.State):
                 self.actuator_id = _ctx.info.actuator_id
                 self.firmware = _ctx.info.firmware_version
                 self.hardware = _ctx.info.hardware_revision
+                self.mode_name = ActuatorMode.DISABLED.name
                 self.status = _ctx.get_status()
                 self._sync_results()
                 self._sync_config()
@@ -883,6 +1134,7 @@ class State(rx.State):
                 self.connected = False
                 self.mode_name = ""
                 self.fault_text = ""
+                self.control_status_text = "No control status read yet"
                 self.status = "Disconnected"
                 self.log_entries = _ctx.get_logs()
         except Exception as exc:
@@ -900,21 +1152,182 @@ class State(rx.State):
         self.status = message
         self.log_entries = _ctx.get_logs()
 
-    def mode_disabled(self) -> None:
+    def _enter_mode(self, mode: ActuatorMode) -> None:
+        label = mode.name
         try:
-            _log("tx", "TX", "SET_MODE DISABLED")
-            _ctx.require_client().set_mode(ActuatorMode.DISABLED)
-            self._set_status("Mode: DISABLED")
+            _log("tx", "TX", f"SET_MODE {label}")
+            _ctx.require_client().set_mode(mode)
+            self.mode_name = label
+            self._set_status(f"Mode: {label}")
         except Exception as exc:
             self._set_status(str(exc), "fault", "FAULT")
 
+    def mode_disabled(self) -> None:
+        self._enter_mode(ActuatorMode.DISABLED)
+
     def mode_calibration(self) -> None:
+        self._enter_mode(ActuatorMode.CALIBRATION)
+
+    def mode_position(self) -> None:
+        self._enter_mode(ActuatorMode.POSITION)
+
+    def mode_velocity(self) -> None:
+        self._enter_mode(ActuatorMode.VELOCITY)
+
+    def mode_torque_proxy(self) -> None:
+        self._enter_mode(ActuatorMode.TORQUE_PROXY)
+
+    async def _control_worker(self, tx_label: str, fn, success_message: str) -> None:
+        async with self:
+            if not self.connected:
+                self.status = "Not connected"
+                return
+            if self.busy:
+                self.status = "Another operation is running"
+                return
+            self.busy = True
+            self.status = f"{success_message}..."
+        loop = asyncio.get_event_loop()
         try:
-            _log("tx", "TX", "SET_MODE CALIBRATION")
-            _ctx.require_client().set_mode(ActuatorMode.CALIBRATION)
-            self._set_status("Mode: CALIBRATION")
+            _log("tx", "TX", tx_label)
+            await loop.run_in_executor(_executor, fn)
+            _ctx.set_status(success_message)
+            _log("event", "EVENT", success_message)
+            async with self:
+                self.status = success_message
+                self.log_entries = _ctx.get_logs()
         except Exception as exc:
-            self._set_status(str(exc), "fault", "FAULT")
+            _ctx.set_status(str(exc))
+            _log("fault", "FAULT", str(exc))
+            async with self:
+                self.status = str(exc)
+                self.log_entries = _ctx.get_logs()
+        finally:
+            async with self:
+                self.busy = False
+
+    @rx.event(background=True)
+    async def do_position_abs(self) -> None:
+        async with self:
+            target, vel, accel = self.position_target, self.position_velocity, self.position_accel
+        await self._control_worker(
+            f"SET_POSITION_TARGET abs {target:.4f} rad @ {vel:.3f} rad/s",
+            lambda: _ctx.require_client().set_position_target(target, vel, accel, relative=False),
+            f"Position target {target:.4f} rad",
+        )
+
+    @rx.event(background=True)
+    async def do_position_rel(self) -> None:
+        async with self:
+            target, vel, accel = self.position_target, self.position_velocity, self.position_accel
+        await self._control_worker(
+            f"SET_POSITION_TARGET rel {target:.4f} rad @ {vel:.3f} rad/s",
+            lambda: _ctx.require_client().set_position_target(target, vel, accel, relative=True),
+            f"Relative position target {target:.4f} rad",
+        )
+
+    @rx.event(background=True)
+    async def do_velocity_target(self) -> None:
+        async with self:
+            target, accel = self.velocity_target, self.velocity_accel
+        await self._control_worker(
+            f"SET_VELOCITY_TARGET {target:.4f} rad/s accel {accel:.3f}",
+            lambda: _ctx.require_client().set_velocity_target(target, accel),
+            f"Velocity target {target:.4f} rad/s",
+        )
+
+    @rx.event(background=True)
+    async def do_velocity_zero(self) -> None:
+        async with self:
+            accel = self.velocity_accel
+        await self._control_worker(
+            f"SET_VELOCITY_TARGET 0.0000 rad/s accel {accel:.3f}",
+            lambda: _ctx.require_client().set_velocity_target(0.0, accel),
+            "Velocity target zero",
+        )
+
+    @rx.event(background=True)
+    async def do_torque_proxy_target(self) -> None:
+        async with self:
+            target = self.torque_proxy_target
+            max_vel = self.torque_proxy_max_velocity
+            max_excursion = self.torque_proxy_max_excursion
+            timeout_s = self.torque_proxy_timeout
+        await self._control_worker(
+            f"SET_TORQUE_PROXY_TARGET {target:.4f} rad",
+            lambda: _ctx.require_client().set_torque_proxy_target(target, max_vel, max_excursion, timeout_s),
+            f"Torque proxy target {target:.4f} rad",
+        )
+
+    @rx.event(background=True)
+    async def do_torque_proxy_zero(self) -> None:
+        async with self:
+            max_vel = self.torque_proxy_max_velocity
+            max_excursion = self.torque_proxy_max_excursion
+            timeout_s = self.torque_proxy_timeout
+        await self._control_worker(
+            "SET_TORQUE_PROXY_TARGET 0.0000 rad",
+            lambda: _ctx.require_client().set_torque_proxy_target(0.0, max_vel, max_excursion, timeout_s),
+            "Torque proxy target zero",
+        )
+
+    @rx.event(background=True)
+    async def do_autotune(self) -> None:
+        async with self:
+            loop_label = self.autotune_loop_selector
+            amplitude = self.autotune_amplitude
+            max_velocity = self.autotune_max_velocity
+            duration_s = self.autotune_duration
+            max_deflection = self.autotune_max_deflection
+        loop_selector = {"Velocity": 1, "Position": 2, "Both": 3}.get(loop_label, 3)
+        await self._control_worker(
+            f"AUTOTUNE_CONTROL {loop_label} amp {amplitude:.4f} rad",
+            lambda: _ctx.require_client().autotune_control(
+                loop_selector,
+                amplitude,
+                max_velocity,
+                duration_s,
+                max_deflection,
+            ),
+            f"Autotune started: {loop_label}",
+        )
+
+    @rx.event(background=True)
+    async def refresh_control_status(self) -> None:
+        async with self:
+            if not self.connected:
+                self.status = "Not connected"
+                return
+            if self.busy:
+                self.status = "Another operation is running"
+                return
+            self.busy = True
+            self.status = "Reading control status..."
+        loop = asyncio.get_event_loop()
+        try:
+            _log("tx", "TX", "GET_CONTROL_STATUS")
+            status = await loop.run_in_executor(_executor, lambda: _ctx.require_client().get_control_status())
+            text = _format_control_status(status)
+            _ctx.set_status("Control status read")
+            _log("rx", "RX", text)
+            async with self:
+                self.control_status_text = text
+                self.output_target_str = _float_text(status.get("target_output_rad"), 4)
+                self.torque_proxy_str = _float_text(status.get("torque_proxy_rad"), 4)
+                self.motor_slip_str = _float_text(status.get("motor_slip_rad"), 4)
+                self.commanded_current_str = _float_text(status.get("commanded_current_a"), 3)
+                self.control_state_str = str(status.get("autotune_state", "-"))
+                self.status = "Control status read"
+                self.log_entries = _ctx.get_logs()
+        except Exception as exc:
+            _ctx.set_status(str(exc))
+            _log("fault", "FAULT", str(exc))
+            async with self:
+                self.status = str(exc)
+                self.log_entries = _ctx.get_logs()
+        finally:
+            async with self:
+                self.busy = False
 
     def do_stop(self) -> None:
         try:
@@ -1097,6 +1510,28 @@ class State(rx.State):
             "pid_kd": _parse_float(self.cfg_pid_kd, "Kd"),
             "pid_i_limit_motor_rad": _parse_float(self.cfg_pid_i_limit, "I-limit"),
             "pid_output_limit_motor_rad": _parse_float(self.cfg_pid_output_limit, "Output limit"),
+            "velocity_pid_kp": _parse_float(self.cfg_velocity_pid_kp, "Velocity Kp"),
+            "velocity_pid_ki": _parse_float(self.cfg_velocity_pid_ki, "Velocity Ki"),
+            "velocity_pid_i_limit_motor_rad": _parse_float(self.cfg_velocity_pid_i_limit, "Velocity I-limit"),
+            "torque_proxy_kp": _parse_float(self.cfg_torque_proxy_kp, "Torque proxy Kp"),
+            "torque_proxy_limit_rad": _parse_float(self.cfg_torque_proxy_limit, "Torque proxy limit"),
+            "torque_proxy_max_motor_velocity_rad_s": _parse_float(
+                self.cfg_torque_proxy_max_velocity,
+                "Torque proxy max velocity",
+            ),
+            "torque_proxy_timeout_s": _parse_float(self.cfg_torque_proxy_timeout, "Torque proxy timeout"),
+            "missed_step_correction_enabled": self.cfg_missed_step_correction_enabled,
+            "missed_step_warn_motor_rad": _parse_float(self.cfg_missed_step_warn, "Missed-step warning"),
+            "missed_step_fault_motor_rad": _parse_float(self.cfg_missed_step_fault, "Missed-step fault"),
+            "missed_step_correction_rate": _parse_float(self.cfg_missed_step_rate, "Missed-step correction rate"),
+            "current_control_enabled": self.cfg_current_control_enabled,
+            "idle_current_ma": _parse_int(self.cfg_idle_current_ma, "Idle current"),
+            "hold_current_ma": _parse_int(self.cfg_hold_current_ma, "Hold current"),
+            "run_current_ma": _parse_int(self.cfg_run_current_ma, "Run current"),
+            "current_downshift_delay_s": _parse_float(self.cfg_current_downshift_delay, "Current downshift delay"),
+            "autotune_max_amplitude_rad": _parse_float(self.cfg_autotune_max_amplitude, "Autotune max amplitude"),
+            "autotune_max_duration_s": _parse_float(self.cfg_autotune_max_duration, "Autotune max duration"),
+            "autotune_max_deflection_rad": _parse_float(self.cfg_autotune_max_deflection, "Autotune max deflection"),
             "backlash_motor_rad": _parse_float(self.cfg_backlash_motor, "Backlash"),
             "backlash_comp_enabled": self.cfg_backlash_comp_enabled,
             "resonance_derating_enabled": self.cfg_resonance_derating_enabled,
@@ -1195,6 +1630,25 @@ class State(rx.State):
         self.cfg_pid_kd = _format_config_number(cal.pid_kd, 6)
         self.cfg_pid_i_limit = _format_config_number(cal.pid_i_limit_motor_rad, 6)
         self.cfg_pid_output_limit = _format_config_number(cal.pid_output_limit_motor_rad, 6)
+        self.cfg_velocity_pid_kp = _format_config_number(cal.velocity_pid_kp, 6)
+        self.cfg_velocity_pid_ki = _format_config_number(cal.velocity_pid_ki, 6)
+        self.cfg_velocity_pid_i_limit = _format_config_number(cal.velocity_pid_i_limit_motor_rad, 6)
+        self.cfg_torque_proxy_kp = _format_config_number(cal.torque_proxy_kp, 6)
+        self.cfg_torque_proxy_limit = _format_config_number(cal.torque_proxy_limit_rad, 6)
+        self.cfg_torque_proxy_max_velocity = _format_config_number(cal.torque_proxy_max_motor_velocity_rad_s, 6)
+        self.cfg_torque_proxy_timeout = _format_config_number(cal.torque_proxy_timeout_s, 6)
+        self.cfg_missed_step_correction_enabled = cal.missed_step_correction_enabled
+        self.cfg_missed_step_warn = _format_config_number(cal.missed_step_warn_motor_rad, 6)
+        self.cfg_missed_step_fault = _format_config_number(cal.missed_step_fault_motor_rad, 6)
+        self.cfg_missed_step_rate = _format_config_number(cal.missed_step_correction_rate, 6)
+        self.cfg_current_control_enabled = cal.current_control_enabled
+        self.cfg_idle_current_ma = _format_config_number(cal.idle_current_ma, 0)
+        self.cfg_hold_current_ma = _format_config_number(cal.hold_current_ma, 0)
+        self.cfg_run_current_ma = _format_config_number(cal.run_current_ma, 0)
+        self.cfg_current_downshift_delay = _format_config_number(cal.current_downshift_delay_s, 6)
+        self.cfg_autotune_max_amplitude = _format_config_number(cal.autotune_max_amplitude_rad, 6)
+        self.cfg_autotune_max_duration = _format_config_number(cal.autotune_max_duration_s, 6)
+        self.cfg_autotune_max_deflection = _format_config_number(cal.autotune_max_deflection_rad, 6)
         self.cfg_backlash_motor = _format_config_number(cal.backlash_motor_rad, 8)
         self.cfg_backlash_comp_enabled = cal.backlash_comp_enabled
         self.cfg_resonance_derating_enabled = cal.resonance_derating_enabled
@@ -1211,17 +1665,36 @@ class State(rx.State):
         self.motor_angle_str = _float_text(latest.motor_rad, 4)
         self.output_angle_str = _float_text(latest.output_rad, 4)
         self.deflection_str = _float_text(deflection, 4)
+        self.output_target_str = _float_text(latest.output_target_rad, 4)
+        self.torque_proxy_str = _float_text(latest.torque_proxy_rad, 4)
+        self.motor_slip_str = _float_text(latest.motor_slip_rad, 4)
+        self.commanded_current_str = _float_text(latest.commanded_current, 3)
+        self.control_state_str = str(latest.control_state)
         self.motor_velocity_str = _float_text(latest.motor_vel_rad_s, 3)
         self.bus_voltage_str = _float_text(latest.bus_voltage, 1)
         self.temperature_str = _float_text(latest.temperature, 1)
-        motor_angle = latest.motor_rad - math.pi / 2
+        ratio = abs(cal.output_per_motor) if math.isfinite(cal.output_per_motor) else 1.0
+        ratio = max(ratio, 1e-6)
+        max_radius = 52.0
+        min_radius = 22.0
+        if ratio <= 1.0:
+            output_radius = max_radius
+            motor_radius = max(min_radius, max_radius * ratio)
+        else:
+            motor_radius = max_radius
+            output_radius = max(min_radius, max_radius / ratio)
+        motor_hand = motor_radius * 0.78
+        output_hand = output_radius * 0.78
+        motor_angle = predicted - math.pi / 2
         output_angle = latest.output_rad - math.pi / 2
-        self.diag_motor_x = f"{79 + 27 * math.cos(motor_angle):.1f}"
-        self.diag_motor_y = f"{85 + 27 * math.sin(motor_angle):.1f}"
-        self.diag_output_x = f"{224 + 37 * math.cos(output_angle):.1f}"
-        self.diag_output_y = f"{85 + 37 * math.sin(output_angle):.1f}"
-        self.diag_motor_label = f"{latest.motor_rad:.4f} rad"
-        self.diag_output_label = f"{latest.output_rad:.4f} rad"
+        self.diag_motor_radius = f"{motor_radius:.1f}"
+        self.diag_output_radius = f"{output_radius:.1f}"
+        self.diag_motor_x = f"{79 + motor_hand * math.cos(motor_angle):.1f}"
+        self.diag_motor_y = f"{85 + motor_hand * math.sin(motor_angle):.1f}"
+        self.diag_output_x = f"{224 + output_hand * math.cos(output_angle):.1f}"
+        self.diag_output_y = f"{85 + output_hand * math.sin(output_angle):.1f}"
+        self.diag_motor_label = f"out {predicted:.4f}"
+        self.diag_output_label = f"meas {latest.output_rad:.4f}"
         self.diag_deflection_label = f"Delta {deflection:+.4f} rad"
 
     def export_report(self) -> None:
@@ -1337,7 +1810,7 @@ body { font-family: 'Space Grotesk', system-ui, sans-serif; color: #e6edf3; font
 .mc-unit { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #484f58; }
 .ov-grid { display: grid; grid-template-columns: minmax(420px, 1fr) 328px; gap: 10px; align-items: start; }
 .chart-stack, .side-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.telemetry-frame { width: 100%; height: 430px; border: 0; display: block; border-radius: 4px; background: #080b10; }
+.telemetry-frame { width: 100%; height: min(78vh, 820px); min-height: 680px; border: 0; display: block; border-radius: 4px; background: #080b10; }
 .res-row, .rep-row, .cfg-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-width: 0; }
 .res-row, .rep-row { padding: 4px 0; border-bottom: 1px solid #21262d; }
 .res-row:last-child, .rep-row:last-child { border-bottom: none; }
@@ -1389,7 +1862,9 @@ body { font-family: 'Space Grotesk', system-ui, sans-serif; color: #e6edf3; font
 .t-sbadge.pass { background: rgba(63,185,80,.12); color: #3fb950; border-color: #3fb950; }
 .t-sbadge.fail { background: rgba(248,81,73,.12); color: #f85149; border-color: #f85149; }
 .t-sbadge.warn { background: rgba(210,153,34,.12); color: #d29922; border-color: #d29922; }
-.cfg-grid, .rep-grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 10px; }
+.cfg-grid, .rep-grid, .ctrl-grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 10px; }
+.ctrl-span { grid-column: span 2; }
+.ctrl-status { font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.45; color: #8b949e; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cfg-sec-title, .rep-sec-title, .card-title, .cc-title { margin-bottom: 8px; }
 .cfg-row { margin-bottom: 8px; }
 .notes-area { min-height: 96px; resize: vertical; background: #1c2128; }
@@ -1414,7 +1889,8 @@ body { font-family: 'Space Grotesk', system-ui, sans-serif; color: #e6edf3; font
   .hdr-status { max-width: 180px; }
   .metric-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ov-grid { grid-template-columns: 1fr; }
-  .cfg-grid, .rep-grid { grid-template-columns: 1fr; }
+  .cfg-grid, .rep-grid, .ctrl-grid { grid-template-columns: 1fr; }
+  .ctrl-span { grid-column: auto; }
 }
 @media (max-width: 720px) {
   .body { flex-direction: column; }
@@ -1499,6 +1975,15 @@ def _seg_button(label: str, active, handler) -> rx.Component:
 
 def _field_label(text: str) -> rx.Component:
     return rx.text(text, class_name="lbl-sm")
+
+
+def _side_input(label: str, value, setter) -> rx.Component:
+    return rx.box(
+        _field_label(label),
+        rx.input(value=value, on_change=setter, class_name="sb-input"),
+        flex="1",
+        min_width="0",
+    )
 
 
 def _section_label(text: str) -> rx.Component:
@@ -1603,8 +2088,11 @@ def mode_section() -> rx.Component:
     return rx.box(
         _section_label("Mode"),
         rx.box(
-            _seg_button("DISABLED", State.mode_name != "CALIBRATION", State.mode_disabled),
-            _seg_button("CALIBRATION", State.mode_name == "CALIBRATION", State.mode_calibration),
+            _seg_button("DIS", (State.mode_name == "DISABLED") | (State.mode_name == ""), State.mode_disabled),
+            _seg_button("CAL", State.mode_name == "CALIBRATION", State.mode_calibration),
+            _seg_button("POS", State.mode_name == "POSITION", State.mode_position),
+            _seg_button("VEL", State.mode_name == "VELOCITY", State.mode_velocity),
+            _seg_button("TORQ", State.mode_name == "TORQUE_PROXY", State.mode_torque_proxy),
             class_name="seg",
         ),
         class_name="sb-sec",
@@ -1648,6 +2136,95 @@ def encoder_section() -> rx.Component:
     )
 
 
+def position_control_section() -> rx.Component:
+    return rx.box(
+        _section_label("Position Control"),
+        _side_input("Target output (rad)", State.position_target.to_string(), State.set_position_target),
+        rx.hstack(
+            _side_input("Velocity", State.position_velocity.to_string(), State.set_position_velocity),
+            _side_input("Accel", State.position_accel.to_string(), State.set_position_accel),
+            class_name="sb-row mt6",
+        ),
+        rx.hstack(
+            _btn("Absolute", State.do_position_abs, disabled=~State.can_position, full=True),
+            _btn("Relative", State.do_position_rel, disabled=~State.can_position, full=True),
+            class_name="sb-row mt8",
+        ),
+        class_name="sb-sec",
+    )
+
+
+def velocity_control_section() -> rx.Component:
+    return rx.box(
+        _section_label("Velocity Control"),
+        _side_input("Target (rad/s)", State.velocity_target.to_string(), State.set_velocity_target),
+        rx.box(_side_input("Accel (rad/s2)", State.velocity_accel.to_string(), State.set_velocity_accel), class_name="mt6"),
+        rx.hstack(
+            _btn("Apply", State.do_velocity_target, disabled=~State.can_velocity, full=True),
+            _btn("Zero", State.do_velocity_zero, disabled=~State.can_velocity, full=True),
+            class_name="sb-row mt8",
+        ),
+        class_name="sb-sec",
+    )
+
+
+def torque_proxy_control_section() -> rx.Component:
+    return rx.box(
+        _section_label("Torque Proxy"),
+        _side_input("Deflection target (rad)", State.torque_proxy_target.to_string(), State.set_torque_proxy_target),
+        rx.hstack(
+            _side_input("Max vel", State.torque_proxy_max_velocity.to_string(), State.set_torque_proxy_max_velocity),
+            _side_input("Excursion", State.torque_proxy_max_excursion.to_string(), State.set_torque_proxy_max_excursion),
+            class_name="sb-row mt6",
+        ),
+        rx.box(_side_input("Timeout (s)", State.torque_proxy_timeout.to_string(), State.set_torque_proxy_timeout), class_name="mt6"),
+        rx.hstack(
+            _btn("Apply", State.do_torque_proxy_target, disabled=~State.can_torque_proxy, full=True),
+            _btn("Zero", State.do_torque_proxy_zero, disabled=~State.can_torque_proxy, full=True),
+            class_name="sb-row mt8",
+        ),
+        class_name="sb-sec",
+    )
+
+
+def autotune_section() -> rx.Component:
+    return rx.box(
+        _section_label("PID Autotune"),
+        rx.select(
+            AUTOTUNE_LOOP_OPTIONS,
+            value=State.autotune_loop_selector,
+            on_change=State.set_autotune_loop_selector,
+            class_name="sb-select",
+        ),
+        rx.hstack(
+            _side_input("Amplitude", State.autotune_amplitude.to_string(), State.set_autotune_amplitude),
+            _side_input("Max vel", State.autotune_max_velocity.to_string(), State.set_autotune_max_velocity),
+            class_name="sb-row mt6",
+        ),
+        rx.hstack(
+            _side_input("Duration", State.autotune_duration.to_string(), State.set_autotune_duration),
+            _side_input("Max defl.", State.autotune_max_deflection.to_string(), State.set_autotune_max_deflection),
+            class_name="sb-row mt6",
+        ),
+        rx.box(_btn("Start Autotune", State.do_autotune, disabled=~State.can_autotune, full=True, variant="pr"), class_name="mt8"),
+        class_name="sb-sec",
+    )
+
+
+def control_status_section() -> rx.Component:
+    return rx.box(
+        _section_label("Control Status"),
+        _result_row("Target", State.output_target_str),
+        _result_row("Deflection", State.torque_proxy_str),
+        _result_row("Slip", State.motor_slip_str),
+        _result_row("Current", State.commanded_current_str),
+        _result_row("State", State.control_state_str),
+        rx.text(State.control_status_text, class_name="ctrl-status mt6"),
+        rx.box(_btn("Refresh", State.refresh_control_status, disabled=~State.can_control, full=True), class_name="mt8"),
+        class_name="sb-sec",
+    )
+
+
 def safety_section() -> rx.Component:
     return rx.box(
         _section_label("Safety"),
@@ -1668,6 +2245,11 @@ def sidebar() -> rx.Component:
         mode_section(),
         jog_section(),
         encoder_section(),
+        position_control_section(),
+        velocity_control_section(),
+        torque_proxy_control_section(),
+        autotune_section(),
+        control_status_section(),
         safety_section(),
         class_name=rx.cond(State.sidebar_collapsed, "sb collapsed", "sb"),
     )
@@ -1684,6 +2266,7 @@ def _tab_button(key: str, label: str) -> rx.Component:
 def tab_bar() -> rx.Component:
     return rx.hstack(
         _tab_button("overview", "Overview"),
+        _tab_button("control", "Control"),
         _tab_button("tests", "Tests"),
         _tab_button("config", "Config"),
         _tab_button("report", "Report"),
@@ -1698,12 +2281,12 @@ def actuator_diagram() -> rx.Component:
         rx.el.svg(
             rx.el.line(x1="79", y1="53", x2="219", y2="46", stroke="#30363d", stroke_width="3"),
             rx.el.line(x1="79", y1="117", x2="219", y2="124", stroke="#30363d", stroke_width="3"),
-            rx.el.circle(cx="79", cy="85", r="34", fill="#1c2128", stroke="#30363d", stroke_width="1.5"),
+            rx.el.circle(cx="79", cy="85", r=State.diag_motor_radius, fill="#1c2128", stroke="#30363d", stroke_width="1.5"),
             rx.el.line(x1="79", y1="85", x2=State.diag_motor_x, y2=State.diag_motor_y, stroke="#2f81f7", stroke_width="3", stroke_linecap="round"),
             rx.el.circle(cx="79", cy="85", r="5", fill="#2f81f7"),
             rx.el.text("Motor", x="79", y="133", text_anchor="middle", fill="#8b949e", font_size="10"),
             rx.el.text(State.diag_motor_label, x="79", y="145", text_anchor="middle", fill="#484f58", font_size="9", font_family="JetBrains Mono"),
-            rx.el.circle(cx="224", cy="85", r="46", fill="#1c2128", stroke="#30363d", stroke_width="1.5"),
+            rx.el.circle(cx="224", cy="85", r=State.diag_output_radius, fill="#1c2128", stroke="#30363d", stroke_width="1.5"),
             rx.el.line(x1="224", y1="85", x2=State.diag_output_x, y2=State.diag_output_y, stroke="#d29922", stroke_width="3", stroke_linecap="round"),
             rx.el.circle(cx="224", cy="85", r="5", fill="#d29922"),
             rx.el.text("Output", x="224", y="147", text_anchor="middle", fill="#8b949e", font_size="10"),
@@ -1723,6 +2306,11 @@ def overview_tab() -> rx.Component:
             _metric("Motor Angle", State.motor_angle_str, "rad"),
             _metric("Output Angle", State.output_angle_str, "rad"),
             _metric("Deflection", State.deflection_str, "rad", highlight=True),
+            _metric("Output Target", State.output_target_str, "rad"),
+            _metric("Torque Proxy", State.torque_proxy_str, "rad", highlight=True),
+            _metric("Motor Slip", State.motor_slip_str, "rad"),
+            _metric("Cmd Current", State.commanded_current_str, "A"),
+            _metric("Control State", State.control_state_str, ""),
             _metric("Motor Velocity", State.motor_velocity_str, "rad/s"),
             _metric("Bus Voltage", State.bus_voltage_str, "V"),
             _metric("Temperature", State.temperature_str, "C"),
@@ -1754,6 +2342,107 @@ def overview_tab() -> rx.Component:
                 class_name="side-col",
             ),
             class_name="ov-grid",
+        ),
+        class_name="tab-pane",
+    )
+
+
+def control_tab() -> rx.Component:
+    return rx.box(
+        rx.box(
+            rx.box(
+                rx.text("Mode", class_name="cfg-sec-title"),
+                rx.box(
+                    _seg_button("Disabled", (State.mode_name == "DISABLED") | (State.mode_name == ""), State.mode_disabled),
+                    _seg_button("Calibration", State.mode_name == "CALIBRATION", State.mode_calibration),
+                    _seg_button("Position", State.mode_name == "POSITION", State.mode_position),
+                    _seg_button("Velocity", State.mode_name == "VELOCITY", State.mode_velocity),
+                    _seg_button("Torque", State.mode_name == "TORQUE_PROXY", State.mode_torque_proxy),
+                    class_name="seg",
+                ),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Position Target", class_name="cfg-sec-title"),
+                _config_input("Output rad", State.position_target.to_string(), State.set_position_target),
+                _config_input("Velocity rad/s", State.position_velocity.to_string(), State.set_position_velocity),
+                _config_input("Accel rad/s2", State.position_accel.to_string(), State.set_position_accel),
+                rx.hstack(
+                    _btn("Absolute", State.do_position_abs, disabled=~State.can_position, variant="pr"),
+                    _btn("Relative", State.do_position_rel, disabled=~State.can_position),
+                    class_name="sb-row mt8",
+                ),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Velocity Target", class_name="cfg-sec-title"),
+                _config_input("Output rad/s", State.velocity_target.to_string(), State.set_velocity_target),
+                _config_input("Accel rad/s2", State.velocity_accel.to_string(), State.set_velocity_accel),
+                rx.hstack(
+                    _btn("Apply", State.do_velocity_target, disabled=~State.can_velocity, variant="pr"),
+                    _btn("Zero", State.do_velocity_zero, disabled=~State.can_velocity),
+                    class_name="sb-row mt8",
+                ),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Torque Proxy Target", class_name="cfg-sec-title"),
+                _config_input("Deflection rad", State.torque_proxy_target.to_string(), State.set_torque_proxy_target),
+                _config_input("Max motor rad/s", State.torque_proxy_max_velocity.to_string(), State.set_torque_proxy_max_velocity),
+                _config_input("Max excursion rad", State.torque_proxy_max_excursion.to_string(), State.set_torque_proxy_max_excursion),
+                _config_input("Timeout s", State.torque_proxy_timeout.to_string(), State.set_torque_proxy_timeout),
+                rx.hstack(
+                    _btn("Apply", State.do_torque_proxy_target, disabled=~State.can_torque_proxy, variant="pr"),
+                    _btn("Zero", State.do_torque_proxy_zero, disabled=~State.can_torque_proxy),
+                    class_name="sb-row mt8",
+                ),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("PID Autotune", class_name="cfg-sec-title"),
+                rx.select(
+                    AUTOTUNE_LOOP_OPTIONS,
+                    value=State.autotune_loop_selector,
+                    on_change=State.set_autotune_loop_selector,
+                    class_name="sb-select",
+                ),
+                _config_input("Amplitude rad", State.autotune_amplitude.to_string(), State.set_autotune_amplitude),
+                _config_input("Max velocity rad/s", State.autotune_max_velocity.to_string(), State.set_autotune_max_velocity),
+                _config_input("Duration s", State.autotune_duration.to_string(), State.set_autotune_duration),
+                _config_input("Max deflection rad", State.autotune_max_deflection.to_string(), State.set_autotune_max_deflection),
+                rx.box(_btn("Start Autotune", State.do_autotune, disabled=~State.can_autotune, variant="pr"), class_name="mt8"),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Correction Test", class_name="cfg-sec-title"),
+                _config_bool("Position PID", State.cfg_pid_enabled, State.enable_pid, State.disable_pid),
+                _config_bool(
+                    "Missed-step correction",
+                    State.cfg_missed_step_correction_enabled,
+                    State.enable_missed_step_correction,
+                    State.disable_missed_step_correction,
+                ),
+                _config_input("Warn slip rad", State.cfg_missed_step_warn, State.set_cfg_missed_step_warn),
+                _config_input("Fault slip rad", State.cfg_missed_step_fault, State.set_cfg_missed_step_fault),
+                _config_input("Correction rate", State.cfg_missed_step_rate, State.set_cfg_missed_step_rate),
+                rx.hstack(
+                    _btn("Save Config", State.save_ui_config, disabled=State.busy | ~State.connected, variant="pr"),
+                    _btn("Refresh Status", State.refresh_control_status, disabled=~State.can_control),
+                    class_name="sb-row mt8",
+                ),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Control Status", class_name="cfg-sec-title"),
+                _result_row("Target", State.output_target_str),
+                _result_row("Torque proxy", State.torque_proxy_str),
+                _result_row("Motor slip", State.motor_slip_str),
+                _result_row("Commanded current", State.commanded_current_str),
+                _result_row("Autotune state", State.control_state_str),
+                rx.text(State.control_status_text, class_name="ctrl-status mt8"),
+                class_name="cfg-sec ctrl-span",
+            ),
+            class_name="ctrl-grid",
         ),
         class_name="tab-pane",
     )
@@ -1831,13 +2520,53 @@ def config_tab() -> rx.Component:
                 class_name="cfg-sec",
             ),
             rx.box(
-                rx.text("PID Parameters", class_name="cfg-sec-title"),
+                rx.text("Position PID", class_name="cfg-sec-title"),
                 _config_bool("PID enabled", State.cfg_pid_enabled, State.enable_pid, State.disable_pid),
                 _config_input("Kp", State.cfg_pid_kp, State.set_cfg_pid_kp),
                 _config_input("Ki", State.cfg_pid_ki, State.set_cfg_pid_ki),
                 _config_input("Kd", State.cfg_pid_kd, State.set_cfg_pid_kd),
                 _config_input("I-limit (motor rad)", State.cfg_pid_i_limit, State.set_cfg_pid_i_limit),
                 _config_input("Output limit (motor rad)", State.cfg_pid_output_limit, State.set_cfg_pid_output_limit),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Velocity PI", class_name="cfg-sec-title"),
+                _config_input("Kp", State.cfg_velocity_pid_kp, State.set_cfg_velocity_pid_kp),
+                _config_input("Ki", State.cfg_velocity_pid_ki, State.set_cfg_velocity_pid_ki),
+                _config_input("I-limit (motor rad)", State.cfg_velocity_pid_i_limit, State.set_cfg_velocity_pid_i_limit),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Torque Proxy", class_name="cfg-sec-title"),
+                _config_input("Kp", State.cfg_torque_proxy_kp, State.set_cfg_torque_proxy_kp),
+                _config_input("Limit (deflection rad)", State.cfg_torque_proxy_limit, State.set_cfg_torque_proxy_limit),
+                _config_input("Max motor vel (rad/s)", State.cfg_torque_proxy_max_velocity, State.set_cfg_torque_proxy_max_velocity),
+                _config_input("Timeout (s)", State.cfg_torque_proxy_timeout, State.set_cfg_torque_proxy_timeout),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Correction / Current", class_name="cfg-sec-title"),
+                _config_bool(
+                    "Missed-step correction",
+                    State.cfg_missed_step_correction_enabled,
+                    State.enable_missed_step_correction,
+                    State.disable_missed_step_correction,
+                ),
+                _config_input("Warn slip (motor rad)", State.cfg_missed_step_warn, State.set_cfg_missed_step_warn),
+                _config_input("Fault slip (motor rad)", State.cfg_missed_step_fault, State.set_cfg_missed_step_fault),
+                _config_input("Correction rate", State.cfg_missed_step_rate, State.set_cfg_missed_step_rate),
+                _config_bool("Current control", State.cfg_current_control_enabled, State.enable_current_control, State.disable_current_control),
+                _config_input("Idle current (mA)", State.cfg_idle_current_ma, State.set_cfg_idle_current_ma),
+                _config_input("Hold current (mA)", State.cfg_hold_current_ma, State.set_cfg_hold_current_ma),
+                _config_input("Run current (mA)", State.cfg_run_current_ma, State.set_cfg_run_current_ma),
+                _config_input("Downshift delay (s)", State.cfg_current_downshift_delay, State.set_cfg_current_downshift_delay),
+                class_name="cfg-sec",
+            ),
+            rx.box(
+                rx.text("Autotune Limits", class_name="cfg-sec-title"),
+                _config_input("Max amplitude (rad)", State.cfg_autotune_max_amplitude, State.set_cfg_autotune_max_amplitude),
+                _config_input("Max duration (s)", State.cfg_autotune_max_duration, State.set_cfg_autotune_max_duration),
+                _config_input("Max deflection (rad)", State.cfg_autotune_max_deflection, State.set_cfg_autotune_max_deflection),
                 class_name="cfg-sec",
             ),
             rx.box(
@@ -1971,6 +2700,7 @@ def log_tab() -> rx.Component:
 def tab_content() -> rx.Component:
     return rx.box(
         rx.cond(State.active_tab == "overview", overview_tab(), rx.fragment()),
+        rx.cond(State.active_tab == "control", control_tab(), rx.fragment()),
         rx.cond(State.active_tab == "tests", tests_tab(), rx.fragment()),
         rx.cond(State.active_tab == "config", config_tab(), rx.fragment()),
         rx.cond(State.active_tab == "report", report_tab(), rx.fragment()),

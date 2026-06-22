@@ -436,6 +436,8 @@ def _run_detection() -> None:
         c.report.events.write("detection", result.as_dict())
     c.set_status(result.message)
     _log("event", "EVENT", f"Actuator Detection: {result.message}")
+    if not result.passed:
+        raise ActuatorError(result.message)
 
 
 def _run_encoder_sanity() -> None:
@@ -1345,6 +1347,16 @@ class State(rx.State):
         except Exception as exc:
             self._set_status(str(exc), "fault", "FAULT")
 
+    def clear_faults(self) -> None:
+        try:
+            _log("tx", "TX", "CLEAR_FAULTS")
+            client = _ctx.require_client()
+            client.clear_faults()
+            client.set_mode(ActuatorMode.DISABLED)
+            self._set_status("Faults cleared")
+        except Exception as exc:
+            self._set_status(str(exc), "fault", "FAULT")
+
     def jog_pos(self) -> None:
         self._jog(1.0)
 
@@ -1441,25 +1453,32 @@ class State(rx.State):
         async with self:
             for key, *_rest in TEST_DEFS:
                 self._set_test_ui(key, "idle", "")
-        await self._worker("detection", "Auto-characterization", _run_auto)
-        async with self:
-            for key, *_rest in TEST_DEFS:
-                state_attr, result_attr = TEST_ATTRS[key]
-                if getattr(self, state_attr) == "idle":
-                    setattr(self, state_attr, "pass")
-                    setattr(self, result_attr, "Completed during auto-characterization")
+        sequence = [
+            ("detection", "Actuator Detection", _run_detection, False),
+            ("encoder", "Encoder Sanity", _run_encoder_sanity, True),
+            ("ratio", "Ratio Calibration", _run_ratio, True),
+            ("resonance", "Resonance Chirp", _run_resonance, True),
+            ("backlash", "Backlash Test", _run_backlash, True),
+            ("step", "Step Response", _run_step_response, True),
+            ("velocity", "Velocity Ramp", _run_velocity_ramp, True),
+            ("compliance", "Compliance / Load", _run_compliance, True),
+            ("save", "Save to Actuator Flash", _save_config, False),
+        ]
+        for key, label, fn, requires_test in sequence:
+            if not await self._worker(key, label, fn, requires_test=requires_test):
+                break
 
     @rx.event(background=True)
     async def save_config(self) -> None:
         await self._worker("save", "Save to Actuator Flash", _save_config, requires_test=False)
 
-    async def _worker(self, key: str, label: str, fn, requires_test: bool = True) -> None:
+    async def _worker(self, key: str, label: str, fn, requires_test: bool = True) -> bool:
         async with self:
             can_run_test = self.connected and self.mode_name == "CALIBRATION" and not self.busy
             if requires_test and not can_run_test:
                 self.status = "Requires CALIBRATION mode"
                 self._set_test_ui(key, "fail", self.status)
-                return
+                return False
             self.busy = True
             self.status = f"{label} started..."
             self._set_test_ui(key, "running", "")
@@ -1475,12 +1494,14 @@ class State(rx.State):
                 self._sync_results()
                 self._sync_config()
                 self.log_entries = _ctx.get_logs()
+            return True
         except Exception as exc:
             _log("fault", "FAULT", f"{label} failed: {exc}")
             async with self:
                 self.status = f"{label} failed: {exc}"
                 self._set_test_ui(key, "fail", str(exc))
                 self.log_entries = _ctx.get_logs()
+            return False
         finally:
             async with self:
                 self.busy = False
@@ -2229,6 +2250,7 @@ def safety_section() -> rx.Component:
     return rx.box(
         _section_label("Safety"),
         _btn("Stop", State.do_stop, disabled=~State.can_control, full=True, variant="am"),
+        rx.box(_btn("Clear Faults", State.clear_faults, disabled=~State.can_control, full=True), class_name="mt6"),
         class_name="sb-sec",
     )
 

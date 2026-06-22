@@ -436,6 +436,7 @@ static float missedStepWarnMotorRad = 0.05f;
 static float missedStepFaultMotorRad = 0.25f;
 static float missedStepCorrectionRate = 0.25f;
 static float motorSlipRad = 0.0f;
+static bool stepReferenceAligned = false;
 
 static bool currentControlEnabled = true;
 static uint16_t idleCurrentMa = 0;
@@ -1052,6 +1053,22 @@ static void zeroEncoder(EncoderState &enc) {
   enc.velocityRadS = 0.0f;
 }
 
+static void alignStepReferenceToMotorEncoder() {
+  if (!motorEncoder.ok) {
+    return;
+  }
+  const int64_t alignedSteps = (int64_t)roundf(motorEncoder.rad / MOTOR_RAD_PER_MICROSTEP);
+  stopStepScheduler(false);
+  portENTER_CRITICAL(&motionMux);
+  currentStepPosition = alignedSteps;
+  targetStepPosition = alignedSteps;
+  portEXIT_CRITICAL(&motionMux);
+  baseTargetStepPosition = alignedSteps;
+  currentSpeedSps = 0.0f;
+  motorSlipRad = 0.0f;
+  stepReferenceAligned = true;
+}
+
 static void configureTmc2209() {
   TMCSerial.begin(TMC_UART_BAUD, SERIAL_8N1, PIN_TMC_UART_RX, PIN_TMC_UART_TX);
   driver.begin();
@@ -1148,6 +1165,15 @@ static void setMode(ActuatorMode nextMode) {
     velocityTargetOutputRadS = 0.0f;
     resetPidState();
   }
+  if ((nextMode == MODE_CALIBRATION ||
+       nextMode == MODE_OPEN_LOOP ||
+       nextMode == MODE_POSITION ||
+       nextMode == MODE_VELOCITY ||
+       nextMode == MODE_TORQUE_PROXY) &&
+      !stepReferenceAligned) {
+    serviceEncoders();
+    alignStepReferenceToMotorEncoder();
+  }
   if (nextMode == MODE_TORQUE_PROXY) {
     torqueProxyTargetRad = torqueProxyRad();
     torqueProxyStartMotorRad = motorEncoder.rad;
@@ -1161,6 +1187,10 @@ static void setMode(ActuatorMode nextMode) {
 
 static void serviceMissedStepCorrection() {
   if (!motorEncoder.ok || !missedStepCorrectionEnabled || faultFlags != FAULT_NONE) {
+    return;
+  }
+  if (!stepReferenceAligned) {
+    alignStepReferenceToMotorEncoder();
     return;
   }
   const int64_t issuedSteps = readCurrentStepPosition();
@@ -2404,6 +2434,7 @@ static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t le
       motorSlipRad = 0.0f;
       currentSpeedSps = 0.0f;
       resetStepPositions();
+      stepReferenceAligned = true;
       sendResponse(command, RESP_OK, sequence);
       break;
 
@@ -2435,6 +2466,10 @@ static void handleCommand(uint16_t sequence, const uint8_t *payload, uint16_t le
       faultFlags = FAULT_NONE;
       controlState = CONTROL_IDLE;
       setLastControlFault("");
+      if (!stepReferenceAligned) {
+        serviceEncoders();
+        alignStepReferenceToMotorEncoder();
+      }
       if (mode == MODE_FAULT) {
         setMode(MODE_DISABLED);
       }

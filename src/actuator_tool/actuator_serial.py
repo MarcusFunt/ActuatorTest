@@ -1002,13 +1002,16 @@ class SimulatedTransport:
             target_output = self.output_per_motor * self._motor_rad + self.output_offset_rad
             if dt > 0 and self.resonance_frequency_hz is not None and self.resonance_frequency_hz > 0.0:
                 omega = 2.0 * math.pi * self.resonance_frequency_hz
-                accel = omega * omega * (target_output - self._output_rad) - (
-                    2.0 * self.resonance_damping_ratio * omega * self._output_vel
-                )
-                new_output_vel = self._output_vel + accel * dt
-                new_output = self._output_rad + new_output_vel * dt
-                self._output_vel = new_output_vel
-                self._output_rad = new_output
+                max_step_s = min(0.002, 1.0 / max(self.resonance_frequency_hz * 40.0, 1.0))
+                remaining_s = dt
+                while remaining_s > 0.0:
+                    step_s = min(remaining_s, max_step_s)
+                    accel = omega * omega * (target_output - self._output_rad) - (
+                        2.0 * self.resonance_damping_ratio * omega * self._output_vel
+                    )
+                    self._output_vel += accel * step_s
+                    self._output_rad += self._output_vel * step_s
+                    remaining_s -= step_s
             elif dt > 0:
                 alpha = min(1.0, dt * 45.0)
                 new_output = self._output_rad + (target_output - self._output_rad) * alpha

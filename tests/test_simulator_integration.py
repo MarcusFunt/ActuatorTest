@@ -4,10 +4,22 @@ import time
 
 import pytest
 
-from actuator_tool.actuator_data import TelemetryStore
+from actuator_tool.actuator_data import ActuatorInfo, TelemetryStore
 from actuator_tool.actuator_protocol import ActuatorMode, CommandID, FaultFlags, ResponseStatus
-from actuator_tool.actuator_serial import ActuatorClient, ActuatorCommandError, CommandResponse, SimulatedTransport
-from actuator_tool.actuator_tests import run_ratio_calibration, run_resonance_test, run_step_response_test
+from actuator_tool.actuator_serial import (
+    ActuatorClient,
+    ActuatorCommandError,
+    ActuatorTimeoutError,
+    CommandResponse,
+    SimulatedTransport,
+)
+from actuator_tool.actuator_tests import (
+    _abort_on_faults,
+    run_detection,
+    run_ratio_calibration,
+    run_resonance_test,
+    run_step_response_test,
+)
 from actuator_tool.config_schema import SafetyLimits
 
 
@@ -49,6 +61,60 @@ def test_characterization_defaults_match_production_targets():
 
     assert ratio_defaults["motor_sweep_rad"].default == pytest.approx(8.0 * math.pi)
     assert step_defaults["settle_capture_s"].default == 10.0
+
+
+def test_detection_accepts_telemetry_schema_v2():
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(), store)
+    client.connect()
+    try:
+        result = run_detection(client)
+    finally:
+        client.disconnect()
+
+    assert result.passed
+    assert result.info is not None
+    assert result.info.telemetry_schema_version == 2
+
+
+def test_detection_rejects_unknown_telemetry_schema():
+    class Client:
+        def ping(self, timeout=1.0):
+            return True
+
+        def info(self, timeout=1.0):
+            return ActuatorInfo(
+                actuator_id="future",
+                firmware_version="future",
+                hardware_revision="future",
+                telemetry_schema_version=99,
+            )
+
+    result = run_detection(Client())
+
+    assert not result.passed
+    assert result.message == "unsupported telemetry schema version"
+
+
+def test_abort_on_faults_retries_transient_timeout():
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.timeouts = []
+
+        def faults(self, timeout=0.0):
+            self.calls += 1
+            self.timeouts.append(timeout)
+            if self.calls == 1:
+                raise ActuatorTimeoutError("transient timeout")
+            return 0
+
+    client = Client()
+
+    _abort_on_faults(client)
+
+    assert client.calls == 2
+    assert client.timeouts == [1.5, 1.5]
 
 
 def test_simulator_connection_and_motion_flow():
@@ -122,7 +188,7 @@ def test_client_wait_response_requires_matching_sequence():
 
 def test_resonance_test_against_resonant_simulator():
     store = TelemetryStore()
-    client = ActuatorClient(SimulatedTransport(sample_hz=200.0, resonance_frequency_hz=8.0), store)
+    client = ActuatorClient(SimulatedTransport(sample_hz=250.0, resonance_frequency_hz=8.0), store)
     client.connect()
     try:
         limits = SafetyLimits(max_velocity_rad_s=20.0, calibration_velocity_rad_s=3.0)
@@ -142,7 +208,7 @@ def test_resonance_test_against_resonant_simulator():
             amplitude_rad=0.06,
             start_frequency_hz=2.0,
             end_frequency_hz=15.0,
-            duration_s=5.0,
+            duration_s=6.0,
             max_deflection_rad=0.5,
         )
 
@@ -150,6 +216,29 @@ def test_resonance_test_against_resonant_simulator():
         assert abs(result.analysis.peak_frequency_hz - 8.0) < 1.0
         assert result.calibration.resonance_frequency_hz == result.analysis.peak_frequency_hz
         assert result.calibration.resonance_derating_enabled is True
+    finally:
+        client.disconnect()
+
+
+def test_resonant_simulator_output_stays_bounded_after_scheduler_stall():
+    transport = SimulatedTransport(sample_hz=200.0, resonance_frequency_hz=8.0)
+    client = ActuatorClient(transport, TelemetryStore())
+    client.connect()
+    try:
+        client.set_mode(ActuatorMode.CALIBRATION)
+        with transport._lock:
+            transport._motor_rad = 0.4
+            transport._target_motor_rad = 0.4
+            transport._base_target_motor_rad = 0.4
+            transport._output_rad = transport.output_offset_rad
+            transport._output_vel = 0.0
+        transport._update_motion(0.08)
+        with transport._lock:
+            deflection = transport._output_rad - (
+                transport.output_per_motor * transport._motor_rad + transport.output_offset_rad
+            )
+        assert math.isfinite(deflection)
+        assert abs(deflection) < 0.25
     finally:
         client.disconnect()
 

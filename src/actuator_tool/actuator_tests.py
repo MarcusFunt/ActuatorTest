@@ -30,7 +30,7 @@ from .actuator_analysis import (
 )
 from .actuator_data import ActuatorInfo, TelemetrySample, TelemetryStore
 from .actuator_protocol import ActuatorMode, FaultFlags
-from .actuator_serial import ActuatorClient, ActuatorError
+from .actuator_serial import ActuatorClient, ActuatorError, ActuatorTimeoutError
 from .config_schema import CalibrationConfig, SafetyLimits
 
 
@@ -77,7 +77,16 @@ def _progress(callback: ProgressCallback | None, message: str) -> None:
 
 
 def _abort_on_faults(client: ActuatorClient) -> None:
-    faults = client.faults(timeout=0.5)
+    last_timeout: ActuatorTimeoutError | None = None
+    for _ in range(3):
+        try:
+            faults = client.faults(timeout=1.5)
+            break
+        except ActuatorTimeoutError as exc:
+            last_timeout = exc
+    else:
+        assert last_timeout is not None
+        raise last_timeout
     if faults:
         raise ActuatorError(f"actuator fault active: {FaultFlags(faults)}")
 
@@ -165,7 +174,7 @@ def run_detection(client: ActuatorClient, progress: ProgressCallback | None = No
             return DetectionResult(False, None, "PING reply was not PONG")
         _progress(progress, "Reading INFO")
         info = client.info(timeout=1.0)
-        if info.telemetry_schema_version != 1:
+        if info.telemetry_schema_version not in (1, 2):
             return DetectionResult(False, info, "unsupported telemetry schema version")
         return DetectionResult(True, info, "actuator detected")
     except Exception as exc:

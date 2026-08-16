@@ -8,6 +8,12 @@ __all__ = [
     "actuator_serial",
     "actuator_tests",
     "config_schema",
+    "plant_adapters",
+    "plant_identification",
+    "plant_schema",
+    "plant_simulator",
+    "plant_telemetry",
+    "plant_validation",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

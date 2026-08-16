@@ -11,6 +11,35 @@ Scope is intentionally limited to actuator bench control, actuator testing,
 calibration analysis, and report generation. ROS/MCAP export and firmware
 flashing/updater modules are out of scope.
 
+## Physical plant identification and digital twin
+
+The repository also contains a compact physical plant pipeline for the belted
+actuator. It is designed to turn dual-encoder bench measurements into parameters
+that can be reused in controller simulations rather than requiring a custom
+physics engine.
+
+Implemented pieces include:
+
+- Coulomb + viscous + optional Stribeck friction identification;
+- motor/output inertia fitting from torque and acceleration data;
+- belt damping estimation from the existing resonance/Q and step-response data,
+  plus a ring-down-envelope fitter;
+- measured NEMA17 torque-speed envelope fitting;
+- command latency/jitter and signal-delay characterization;
+- encoder resolution, quantization/noise, sample-period, and timing-jitter characterization;
+- versioned `ActuatorPlantParameters` JSON schema;
+- a two-inertia motor/reduction/belt/output simulator with torque-speed saturation,
+  fitted friction, command delay, and encoder observation models;
+- measured-vs-simulated trace validation metrics; and
+- MuJoCo and Project Chrono adapters.
+
+See [`docs/PLANT_IDENTIFICATION.md`](docs/PLANT_IDENTIFICATION.md) for the bench
+sequence, equations, fitting workflow, validation procedure, and engine adapters.
+
+The existing `SimulatedTransport` remains useful for protocol/UI smoke testing.
+`TwoInertiaActuatorSimulator` is the physical digital-twin model intended for
+controller and drivetrain work.
+
 ## Quick start
 
 Requirements:

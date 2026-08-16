@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "actuator-bench-tool"
-version = "0.2.0"
-description = "Actuator calibration and characterization bench tool — Reflex/Bokeh web UI"
+version = "0.3.0"
+description = "Actuator calibration, characterization, plant identification, and digital-twin bench tool"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

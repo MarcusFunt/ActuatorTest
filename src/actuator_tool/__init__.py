@@ -12,6 +12,7 @@ __all__ = [
     "plant_identification",
     "plant_schema",
     "plant_simulator",
+    "plant_telemetry",
     "plant_validation",
 ]
 

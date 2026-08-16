@@ -1,7 +1,7 @@
 """Guided bench-characterization orchestration for the belted actuator.
 
 This module bridges the existing hardware test runners with the physical plant
-identification/digital-twin modules.  It intentionally keeps Reflex/UI concerns
+identification/digital-twin modules. It intentionally keeps Reflex/UI concerns
 out of the backend so the same workflow can be driven from a CLI or notebook.
 """
 
@@ -110,10 +110,7 @@ def plant_from_calibration(
     return plant
 
 
-def apply_static_stiffness(
-    plant: ActuatorPlantParameters,
-    stiffness_nm_per_rad: float,
-) -> ActuatorPlantParameters:
+def apply_static_stiffness(plant: ActuatorPlantParameters, stiffness_nm_per_rad: float) -> ActuatorPlantParameters:
     if not math.isfinite(stiffness_nm_per_rad) or stiffness_nm_per_rad <= 0.0:
         raise ValueError("belt stiffness must be finite and positive")
     data = plant.as_dict()
@@ -128,12 +125,7 @@ def derive_motor_inertia_from_relative_mode(
     output_inertia_kg_m2: float,
     gear_ratio_motor_per_output: float,
 ) -> float:
-    """Infer motor-side inertia from the measured two-inertia relative mode.
-
-    The measured relative-mode inertia is ``K / omega_n^2`` and obeys
-    ``1/J_eq = 1/J_motor_reflected + 1/J_output``.  Motor inertia is then
-    obtained by undoing the N^2 reflection through the reduction.
-    """
+    """Infer motor-side inertia from the measured two-inertia relative mode."""
     if belt_stiffness_nm_per_rad <= 0.0:
         raise ValueError("belt stiffness must be positive")
     if resonance_frequency_hz <= 0.0:
@@ -147,8 +139,7 @@ def derive_motor_inertia_from_relative_mode(
     j_eq = belt_stiffness_nm_per_rad / (omega * omega)
     if j_eq >= output_inertia_kg_m2:
         raise ValueError(
-            "relative-mode inertia is not smaller than output inertia; "
-            "check stiffness, resonance frequency, and output inertia"
+            "relative-mode inertia is not smaller than output inertia; check stiffness, resonance frequency, and output inertia"
         )
     reflected_motor = 1.0 / (1.0 / j_eq - 1.0 / output_inertia_kg_m2)
     return reflected_motor / (gear_ratio_motor_per_output**2)
@@ -177,9 +168,10 @@ def run_friction_velocity_sweep(
     capture_s: float = 0.65,
     acceleration_rad_s2: float = 8.0,
     external_load_torque_nm: float = 0.0,
+    output_offset_rad: float = 0.0,
     include_stribeck: bool = True,
 ) -> tuple[FrictionFitResult, list[TelemetrySample]]:
-    """Run slow bidirectional steady-state segments and fit output friction."""
+    """Run bidirectional steady-state segments and fit output friction."""
     plant.validate()
     safety.validate()
     client.set_mode(ActuatorMode.VELOCITY)
@@ -205,7 +197,7 @@ def run_friction_velocity_sweep(
 
     if len(samples) < 30:
         raise ActuatorError("not enough steady-state samples for friction fitting")
-    dynamics = derive_telemetry_dynamics(samples, plant)
+    dynamics = derive_telemetry_dynamics(samples, plant, output_offset_rad=output_offset_rad)
     resisting = (
         dynamics.belt_torque_nm
         - plant.output_inertia_kg_m2 * dynamics.output_acceleration_rad_s2
@@ -236,6 +228,7 @@ def run_output_inertia_excitation(
     acceleration_rad_s2: float = 12.0,
     segment_s: float = 1.15,
     external_load_torque_nm: float = 0.0,
+    output_offset_rad: float = 0.0,
 ) -> tuple[InertiaFitResult, list[TelemetrySample]]:
     """Excite acceleration in both directions and fit output-side inertia."""
     plant.validate()
@@ -264,6 +257,7 @@ def run_output_inertia_excitation(
         samples,
         plant,
         friction=friction,
+        output_offset_rad=output_offset_rad,
         external_load_torque_nm=external_load_torque_nm,
     )
     return result, samples
@@ -308,8 +302,7 @@ def fit_ringdown_from_samples(
     t = np.array([(sample.t_us - t0) / 1_000_000.0 for sample in sample_list], dtype=float)
     ratio = plant.gear_ratio_motor_per_output
     deflection = np.array(
-        [sample.motor_rad / ratio + output_offset_rad - sample.output_rad for sample in sample_list],
-        dtype=float,
+        [sample.motor_rad / ratio + output_offset_rad - sample.output_rad for sample in sample_list], dtype=float
     )
     return fit_belt_damping_from_ringdown(
         t,
@@ -331,8 +324,7 @@ def parse_torque_speed_points(text: str) -> tuple[np.ndarray, np.ndarray]:
         if len(parts) != 2:
             raise ValueError(f"torque-speed line {line_number} must be speed,torque")
         try:
-            speed = float(parts[0])
-            torque = float(parts[1])
+            speed, torque = float(parts[0]), float(parts[1])
         except ValueError as exc:
             raise ValueError(f"torque-speed line {line_number} is not numeric") from exc
         if not math.isfinite(speed) or not math.isfinite(torque):
@@ -346,12 +338,7 @@ def parse_torque_speed_points(text: str) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(speeds, dtype=float), np.asarray(torques, dtype=float)
 
 
-def fit_torque_speed_text(
-    text: str,
-    *,
-    bins: int = 10,
-    quantile: float = 0.9,
-) -> TorqueSpeedMapFitResult:
+def fit_torque_speed_text(text: str, *, bins: int = 10, quantile: float = 0.9) -> TorqueSpeedMapFitResult:
     speed, torque = parse_torque_speed_points(text)
     return fit_torque_speed_map(speed, torque, bins=bins, quantile=quantile, enforce_monotonic=True)
 
@@ -442,21 +429,36 @@ def update_plant(
 def mechanical_replay_validation(
     samples: Iterable[TelemetrySample],
     plant: ActuatorPlantParameters,
+    *,
+    output_offset_rad: float = 0.0,
 ) -> tuple[PlantSimulationTrace, PlantValidationReport]:
-    """Validate mechanics on a hold-out trace using encoder-inferred motor torque.
+    """Validate mechanics on a hold-out trace using encoder-inferred delivered torque.
 
-    This is intentionally called *mechanical replay* rather than full command-to-
-    motion validation: the input torque is inferred from the measured dual-
-    encoder drivetrain state.  It validates inertia/compliance/friction dynamics
-    without pretending phase current is a calibrated stepper torque command.
+    Mechanical replay deliberately removes command-path latency and the measured
+    torque-speed limiter because the replay input is already an estimate of the
+    *delivered* motor torque. This isolates inertia/compliance/friction accuracy.
     """
     sample_list = list(samples)
     if len(sample_list) < 16:
         raise ValueError("not enough hold-out samples for validation")
+
     measured = telemetry_to_trace(sample_list)
-    dynamics = derive_telemetry_dynamics(sample_list, plant)
+    measured = dict(measured)
+    measured["output_angle_rad"] = measured["output_angle_rad"] - float(output_offset_rad)
+    dynamics = derive_telemetry_dynamics(sample_list, plant, output_offset_rad=output_offset_rad)
     torque = dynamics.estimated_motor_torque_to_drivetrain_nm
-    simulator = TwoInertiaActuatorSimulator(plant)
+
+    replay_data = plant.as_dict()
+    replay_data["command_latency_s"] = 0.0
+    replay_data["command_jitter_std_s"] = 0.0
+    torque_limit = max(1.0, float(np.max(np.abs(torque))) * 2.0)
+    replay_data["motor_torque_speed_map"] = [
+        asdict(TorqueSpeedPoint(0.0, torque_limit)),
+        asdict(TorqueSpeedPoint(1.0e6, torque_limit)),
+    ]
+    replay_plant = ActuatorPlantParameters.from_dict(replay_data)
+
+    simulator = TwoInertiaActuatorSimulator(replay_plant)
     simulator.reset(
         motor_angle_rad=float(measured["motor_angle_rad"][0]),
         motor_velocity_rad_s=float(measured["motor_velocity_rad_s"][0]),

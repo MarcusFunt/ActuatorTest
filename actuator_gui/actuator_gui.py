@@ -1379,7 +1379,18 @@ class State(rx.State):
     @rx.event(background=True)
     async def do_move_rel(self) -> None:
         async with self:
+            if not self.connected:
+                self.status = "Not connected"
+                return
+            if self.mode_name != ActuatorMode.CALIBRATION.name:
+                self.status = "Move Relative requires CALIBRATION mode"
+                return
+            if self.busy:
+                self.status = "Another operation is running"
+                return
             delta, vel, accel = self.move_delta, self.move_velocity, self.move_accel
+            self.busy = True
+            self.status = "Moving..."
         loop = asyncio.get_event_loop()
         try:
             _log("tx", "TX", f"MOVE_REL {delta:.3f} rad @ {vel:.3f} rad/s")
@@ -1399,6 +1410,9 @@ class State(rx.State):
             async with self:
                 self.status = str(exc)
                 self.log_entries = _ctx.get_logs()
+        finally:
+            async with self:
+                self.busy = False
 
     def zero_motor(self) -> None:
         try:

@@ -21,7 +21,7 @@ physics engine.
 Implemented pieces include:
 
 - Coulomb + viscous + optional Stribeck friction identification;
-- motor/output inertia fitting from torque and acceleration data;
+- motor/output inertia fitting and relative-mode motor-inertia inference;
 - belt damping estimation from the existing resonance/Q and step-response data,
   plus a ring-down-envelope fitter;
 - measured NEMA17 torque-speed envelope fitting;
@@ -39,6 +39,34 @@ sequence, equations, fitting workflow, validation procedure, and engine adapters
 The existing `SimulatedTransport` remains useful for protocol/UI smoke testing.
 `TwoInertiaActuatorSimulator` is the physical digital-twin model intended for
 controller and drivetrain work.
+
+### Guided Characterize Actuator GUI
+
+The Reflex app now includes a guided workflow at:
+
+```text
+http://localhost:3000/characterize
+```
+
+Connect to hardware (or the simulator) on the normal Bench page first, then open
+**Characterize actuator**. The workflow guides the operator through:
+
+1. ratio calibration;
+2. static stiffness with a known applied output torque;
+3. bidirectional friction sweep and Coulomb/viscous/Stribeck fit;
+4. acceleration-based output-inertia identification;
+5. chirp + step-response damping, with optional manual ring-down capture;
+6. fitting a measured NEMA17 torque-speed envelope;
+7. command-to-motion latency and telemetry timing jitter;
+8. motor/output encoder quantization, noise, sampling period and jitter;
+9. generation of `plant.json` plus a full characterization summary; and
+10. a fresh hold-out mechanical replay validation against the two-inertia digital twin.
+
+The torque-speed step deliberately expects **measured mechanical torque** from a
+load cell/dynamometer or another calibrated load method. Electrical input power
+is not treated as shaft torque. The final validation is explicitly mechanical
+replay using encoder-inferred delivered torque; it does not claim a calibrated
+TMC2209-current-to-stepper-torque model.
 
 ## Quick start
 

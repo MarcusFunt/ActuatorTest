@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+
 def _find_project_root() -> Path:
     """Find the checkout root that contains the Reflex config."""
     for parent in Path(__file__).resolve().parents:
@@ -59,7 +60,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Hardware port preselected: {args.port}")
     else:
         print("Simulator transport preselected.")
-    print("Open http://localhost:3000 in your browser.")
+    print("Bench:       http://localhost:3000/")
+    print("Characterize: http://localhost:3000/characterize")
     subprocess.run(cmd, cwd=_PROJECT_ROOT, check=True, env=env)
 
 

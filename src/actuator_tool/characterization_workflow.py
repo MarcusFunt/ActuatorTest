@@ -157,6 +157,35 @@ def _sleep_capture(store: TelemetryStore, duration_s: float) -> list[TelemetrySa
     return store.samples_since(start)
 
 
+def _resolve_output_offset(
+    samples: Sequence[TelemetrySample],
+    plant: ActuatorPlantParameters,
+    output_offset_rad: float | None,
+    *,
+    initial_fraction: float | None = None,
+) -> float:
+    """Use a supplied calibration offset or infer the encoder zero relation.
+
+    Symmetric bidirectional captures make the median of ``output - motor/N`` a
+    useful fallback because elastic deflection changes sign. For a hold-out step,
+    use the initial portion where the actuator is closest to its pre-step state.
+    """
+    if output_offset_rad is not None:
+        value = float(output_offset_rad)
+        if not math.isfinite(value):
+            raise ValueError("output_offset_rad must be finite")
+        return value
+    if not samples:
+        return 0.0
+    chosen = list(samples)
+    if initial_fraction is not None:
+        count = max(3, int(round(len(chosen) * initial_fraction)))
+        chosen = chosen[:count]
+    ratio = plant.gear_ratio_motor_per_output
+    offsets = [sample.output_rad - sample.motor_rad / ratio for sample in chosen]
+    return float(np.median(np.asarray(offsets, dtype=float)))
+
+
 def run_friction_velocity_sweep(
     client: ActuatorClient,
     store: TelemetryStore,
@@ -168,7 +197,7 @@ def run_friction_velocity_sweep(
     capture_s: float = 0.65,
     acceleration_rad_s2: float = 8.0,
     external_load_torque_nm: float = 0.0,
-    output_offset_rad: float = 0.0,
+    output_offset_rad: float | None = None,
     include_stribeck: bool = True,
 ) -> tuple[FrictionFitResult, list[TelemetrySample]]:
     """Run bidirectional steady-state segments and fit output friction."""
@@ -197,7 +226,8 @@ def run_friction_velocity_sweep(
 
     if len(samples) < 30:
         raise ActuatorError("not enough steady-state samples for friction fitting")
-    dynamics = derive_telemetry_dynamics(samples, plant, output_offset_rad=output_offset_rad)
+    offset = _resolve_output_offset(samples, plant, output_offset_rad)
+    dynamics = derive_telemetry_dynamics(samples, plant, output_offset_rad=offset)
     resisting = (
         dynamics.belt_torque_nm
         - plant.output_inertia_kg_m2 * dynamics.output_acceleration_rad_s2
@@ -228,7 +258,7 @@ def run_output_inertia_excitation(
     acceleration_rad_s2: float = 12.0,
     segment_s: float = 1.15,
     external_load_torque_nm: float = 0.0,
-    output_offset_rad: float = 0.0,
+    output_offset_rad: float | None = None,
 ) -> tuple[InertiaFitResult, list[TelemetrySample]]:
     """Excite acceleration in both directions and fit output-side inertia."""
     plant.validate()
@@ -253,11 +283,12 @@ def run_output_inertia_excitation(
     samples = store.samples_since(start)
     if len(samples) < 30:
         raise ActuatorError("not enough samples for inertia fitting")
+    offset = _resolve_output_offset(samples, plant, output_offset_rad)
     result = fit_output_inertia_from_telemetry(
         samples,
         plant,
         friction=friction,
-        output_offset_rad=output_offset_rad,
+        output_offset_rad=offset,
         external_load_torque_nm=external_load_torque_nm,
     )
     return result, samples
@@ -430,7 +461,7 @@ def mechanical_replay_validation(
     samples: Iterable[TelemetrySample],
     plant: ActuatorPlantParameters,
     *,
-    output_offset_rad: float = 0.0,
+    output_offset_rad: float | None = None,
 ) -> tuple[PlantSimulationTrace, PlantValidationReport]:
     """Validate mechanics on a hold-out trace using encoder-inferred delivered torque.
 
@@ -442,10 +473,10 @@ def mechanical_replay_validation(
     if len(sample_list) < 16:
         raise ValueError("not enough hold-out samples for validation")
 
-    measured = telemetry_to_trace(sample_list)
-    measured = dict(measured)
-    measured["output_angle_rad"] = measured["output_angle_rad"] - float(output_offset_rad)
-    dynamics = derive_telemetry_dynamics(sample_list, plant, output_offset_rad=output_offset_rad)
+    offset = _resolve_output_offset(sample_list, plant, output_offset_rad, initial_fraction=0.12)
+    measured = dict(telemetry_to_trace(sample_list))
+    measured["output_angle_rad"] = measured["output_angle_rad"] - offset
+    dynamics = derive_telemetry_dynamics(sample_list, plant, output_offset_rad=offset)
     torque = dynamics.estimated_motor_torque_to_drivetrain_nm
 
     replay_data = plant.as_dict()

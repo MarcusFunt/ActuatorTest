@@ -7,6 +7,7 @@ __all__ = [
     "actuator_report",
     "actuator_serial",
     "actuator_tests",
+    "characterization_workflow",
     "config_schema",
     "plant_adapters",
     "plant_identification",
@@ -16,4 +17,4 @@ __all__ = [
     "plant_validation",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

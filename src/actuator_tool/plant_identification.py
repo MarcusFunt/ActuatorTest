@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
 from scipy import optimize, signal
@@ -180,7 +180,6 @@ def fit_friction(
 
         def residual(x: np.ndarray) -> np.ndarray:
             coulomb, viscous, static_extra, v_s = x
-            static = coulomb + static_extra
             curve = coulomb + static_extra * np.exp(-np.square(np.abs(velocity) / v_s))
             predicted = sign_basis * curve + viscous * velocity
             return predicted - torque

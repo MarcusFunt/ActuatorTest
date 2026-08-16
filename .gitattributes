@@ -1,0 +1,17 @@
+# Keep repository text stable across Windows, macOS, Linux, and CI.
+* text=auto eol=lf
+
+# Firmware and source files are text even when edited by Arduino tooling.
+*.ino text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+
+# Common binary artefacts must not be transformed.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary

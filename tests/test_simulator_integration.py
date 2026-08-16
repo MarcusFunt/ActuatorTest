@@ -9,6 +9,7 @@ from actuator_tool.actuator_protocol import ActuatorMode, CommandID, FaultFlags,
 from actuator_tool.actuator_serial import (
     ActuatorClient,
     ActuatorCommandError,
+    ActuatorError,
     ActuatorTimeoutError,
     CommandResponse,
     SimulatedTransport,
@@ -133,6 +134,67 @@ def test_simulator_connection_and_motion_flow():
         assert store.latest() is not None
         assert store.latest().mode == int(ActuatorMode.CALIBRATION)
         client.stop()
+    finally:
+        client.disconnect()
+
+
+def test_failing_telemetry_callback_does_not_stop_reader_or_commands():
+    store = TelemetryStore()
+    client = ActuatorClient(SimulatedTransport(sample_hz=100.0), store)
+
+    def broken_callback(_sample):
+        raise RuntimeError("report disk unavailable")
+
+    client.add_telemetry_callback(broken_callback)
+    client.connect()
+    try:
+        client.start_stream()
+        wait_for_samples(store, 3)
+
+        assert client.ping()
+        assert client.callback_error_count > 0
+        assert client._reader_thread is not None and client._reader_thread.is_alive()
+        assert "report disk unavailable" in client.drain_callback_errors()[0]
+    finally:
+        client.disconnect()
+
+
+def test_verified_config_write_round_trips_through_simulator():
+    client = ActuatorClient(SimulatedTransport())
+    client.connect()
+    try:
+        persisted = client.apply_config_verified({"pid_kp": 1.25, "current_control_enabled": True})
+
+        assert persisted["pid_kp"] == pytest.approx(1.25)
+        assert persisted["current_control_enabled"] is True
+        assert client.get_config()["pid_kp"] == pytest.approx(1.25)
+    finally:
+        client.disconnect()
+
+
+def test_verified_config_write_rolls_back_after_partial_failure(monkeypatch):
+    client = ActuatorClient(SimulatedTransport())
+    client.connect()
+    try:
+        before = client.get_config()
+        original_set_config = client.set_config
+        failed = False
+
+        def fail_once(key, value, timeout=1.0):
+            nonlocal failed
+            if key == "pid_ki" and not failed:
+                failed = True
+                raise ActuatorTimeoutError("injected write failure")
+            return original_set_config(key, value, timeout=timeout)
+
+        monkeypatch.setattr(client, "set_config", fail_once)
+
+        with pytest.raises(ActuatorError, match="rollback was attempted"):
+            client.apply_config_verified({"pid_kp": 1.25, "pid_ki": 2.5})
+
+        after = client.get_config()
+        assert after["pid_kp"] == pytest.approx(before["pid_kp"])
+        assert after["pid_ki"] == pytest.approx(before["pid_ki"])
     finally:
         client.disconnect()
 

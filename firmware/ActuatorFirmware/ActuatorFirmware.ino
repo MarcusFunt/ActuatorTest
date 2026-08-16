@@ -1,4 +1,10 @@
 #include <Arduino.h>
+#if __has_include(<esp_arduino_version.h>)
+#include <esp_arduino_version.h>
+#endif
+#ifndef ESP_ARDUINO_VERSION_MAJOR
+#define ESP_ARDUINO_VERSION_MAJOR 2
+#endif
 #include <ArduinoJson.h>
 #include <HardwareSerial.h>
 #include <Preferences.h>
@@ -759,7 +765,12 @@ static void armStepTimer(uint32_t delayUs) {
   }
   timerStop(stepTimer);
   timerWrite(stepTimer, 0);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
   timerAlarm(stepTimer, delayUs < 1 ? 1 : delayUs, false, 0);
+#else
+  timerAlarmWrite(stepTimer, delayUs < 1 ? 1 : delayUs, false);
+  timerAlarmEnable(stepTimer);
+#endif
   timerStart(stepTimer);
 }
 
@@ -768,7 +779,12 @@ static void IRAM_ATTR armStepTimerFromIsr(uint32_t delayUs) {
     return;
   }
   timerWrite(stepTimer, 0);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
   timerAlarm(stepTimer, delayUs < 1 ? 1 : delayUs, false, 0);
+#else
+  timerAlarmWrite(stepTimer, delayUs < 1 ? 1 : delayUs, false);
+  timerAlarmEnable(stepTimer);
+#endif
 }
 
 static void setStepIntervalUs(uint32_t intervalUs) {
@@ -1126,8 +1142,14 @@ static void IRAM_ATTR onStepTimer() {
 }
 
 static void configureStepTimer() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
   stepTimer = timerBegin(STEP_TIMER_HZ);
   timerAttachInterrupt(stepTimer, &onStepTimer);
+#else
+  // Core 2.x uses an 80 MHz APB timer divided to a 1 MHz microsecond clock.
+  stepTimer = timerBegin(0, 80, true);
+  timerAttachInterrupt(stepTimer, &onStepTimer, true);
+#endif
   timerStop(stepTimer);
 }
 

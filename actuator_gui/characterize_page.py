@@ -38,7 +38,8 @@ from actuator_tool.characterization_workflow import (
 )
 from actuator_tool.plant_schema import ActuatorPlantParameters
 
-from .actuator_gui import DESIGN_CSS, _REPORT_ROOT, _ctx, _executor, app
+from .actuator_gui import DESIGN_CSS, _REPORT_ROOT, app
+from .backend import ctx as _ctx, executor as _executor
 
 
 GUIDE_CSS = r"""

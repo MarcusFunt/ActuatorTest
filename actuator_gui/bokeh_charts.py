@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import math
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -22,6 +23,7 @@ from actuator_tool.actuator_data import TelemetrySample
 
 BOKEH_PORT = 5006
 _MAX_POINTS = 800
+_SESSION_TOKEN_EXPIRATION_S = int(os.environ.get("ACTUATOR_BOKEH_SESSION_TOKEN_EXPIRATION_S", "28800"))
 
 _DARK_THEME = Theme(
     json={
@@ -485,6 +487,17 @@ def _make_document(doc: Any, ctx_obj: Any) -> None:
     doc.add_periodic_callback(update, 100)  # 10 Hz
 
 
+def local_websocket_origins(port: int, frontend_port: int | None = None) -> list[str]:
+    """Return the small, loopback-only origin set needed by the embedded chart."""
+    frontend_port = frontend_port or int(os.environ.get("REFLEX_FRONTEND_PORT", "3000"))
+    return [
+        f"localhost:{port}",
+        f"127.0.0.1:{port}",
+        f"localhost:{frontend_port}",
+        f"127.0.0.1:{frontend_port}",
+    ]
+
+
 def start_bokeh_server(ctx_obj: Any, port: int = BOKEH_PORT) -> None:
     """Start the Bokeh server in the calling thread. Blocks indefinitely."""
     # Give Tornado its own event loop so it does not conflict with Reflex/uvicorn.
@@ -493,29 +506,10 @@ def start_bokeh_server(ctx_obj: Any, port: int = BOKEH_PORT) -> None:
     try:
         server = Server(
             {"/": Application(FunctionHandler(lambda doc: _make_document(doc, ctx_obj)))},
+            address="127.0.0.1",
             port=port,
-            session_token_expiration=3600,
-            allow_websocket_origin=[
-                f"localhost:{port}",
-                "localhost:3000",
-                "localhost:3001",
-                "localhost:3002",
-                "localhost:3003",
-                "localhost:3004",
-                "localhost:3005",
-                "localhost:3006",
-                "localhost:8000",
-                "localhost:8001",
-                "127.0.0.1:3000",
-                "127.0.0.1:3001",
-                "127.0.0.1:3002",
-                "127.0.0.1:3003",
-                "127.0.0.1:3004",
-                "127.0.0.1:3005",
-                "127.0.0.1:3006",
-                "127.0.0.1:8000",
-                "127.0.0.1:8001",
-            ],
+            session_token_expiration=_SESSION_TOKEN_EXPIRATION_S,
+            allow_websocket_origin=local_websocket_origins(port),
         )
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:

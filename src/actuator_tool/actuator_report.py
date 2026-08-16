@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import importlib.metadata
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
 from pathlib import Path
+import platform
+import subprocess
+import sys
 import threading
 from typing import Any, Iterable
 
@@ -17,7 +22,7 @@ import matplotlib.pyplot as plt
 
 from .actuator_analysis import RatioFitResult, ResonanceResult, compute_deflection, predicted_output
 from .actuator_data import ActuatorInfo, TelemetrySample, TelemetryStore
-from .config_schema import CalibrationConfig
+from .config_schema import CalibrationConfig, SafetyLimits
 
 
 RAW_FIELDNAMES = [
@@ -60,6 +65,7 @@ class SessionArtifacts:
     resonance_plot_png: Path
     summary_txt: Path
     notes_md: Path
+    run_manifest_json: Path
 
     def as_dict(self) -> dict[str, str]:
         return {key: str(value) for key, value in self.__dict__.items()}
@@ -85,6 +91,7 @@ def create_session_folder(root: str | Path = "reports") -> SessionArtifacts:
         resonance_plot_png=folder / "resonance_plot.png",
         summary_txt=folder / "summary.txt",
         notes_md=folder / "notes.md",
+        run_manifest_json=folder / "run_manifest.json",
     )
 
 
@@ -164,6 +171,40 @@ class SessionReport:
         self.recorder = CsvTelemetryRecorder(self.artifacts.raw_csv)
         self.events = EventCsvWriter(self.artifacts.events_csv)
         self.artifacts.notes_md.write_text("", encoding="utf-8")
+
+    def write_run_manifest(
+        self,
+        *,
+        connection: dict[str, Any],
+        info: ActuatorInfo | None,
+        safety: SafetyLimits | None,
+        calibration: CalibrationConfig | None,
+    ) -> str:
+        """Write a session-start provenance manifest and return its content hash."""
+        config = {
+            "safety": safety.__dict__ if safety is not None else {},
+            "calibration": calibration.as_dict() if calibration is not None else {},
+        }
+        manifest = {
+            "schema_version": 1,
+            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "git_revision": _git_revision(),
+            "host": {
+                "python": sys.version,
+                "platform": platform.platform(),
+                "packages": _package_versions(),
+            },
+            "connection": connection,
+            "actuator": info.as_dict() if info is not None else {},
+            "configuration": config,
+            "configuration_sha256": _sha256_json(config),
+        }
+        manifest["manifest_sha256"] = _sha256_json(manifest)
+        self.artifacts.run_manifest_json.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return str(manifest["manifest_sha256"])
 
     def close(self) -> None:
         self.recorder.close()
@@ -282,8 +323,16 @@ def write_summary(
     ratio_fit: RatioFitResult | None,
     calibration: CalibrationConfig | None,
     warnings: Iterable[str] = (),
+    manifest_path: str | Path | None = None,
 ) -> None:
     stats = telemetry_store.stats
+    resolved_manifest = Path(manifest_path) if manifest_path is not None else Path(path).parent / "run_manifest.json"
+    manifest_hash = ""
+    if resolved_manifest.exists():
+        try:
+            manifest_hash = str(json.loads(resolved_manifest.read_text(encoding="utf-8")).get("manifest_sha256", ""))
+        except (OSError, json.JSONDecodeError):
+            manifest_hash = "unreadable"
     lines = [
         "Actuator calibration summary",
         "============================",
@@ -293,6 +342,8 @@ def write_summary(
         f"Hardware revision: {info.hardware_revision if info else ''}",
         f"Firmware version: {info.firmware_version if info else ''}",
         f"Telemetry schema: {info.telemetry_schema_version if info else ''}",
+        f"Run manifest: {resolved_manifest}",
+        f"Run manifest SHA-256: {manifest_hash}",
         "",
         f"Raw sample count: {stats.total_samples}",
         f"Dropped sample count: {stats.dropped_samples}",
@@ -329,3 +380,29 @@ def write_summary(
         lines.append("- none")
     lines.append("")
     Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _sha256_json(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _git_revision() -> str:
+    root = Path(__file__).resolve().parents[2]
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _package_versions() -> dict[str, str]:
+    names = ("actuator-bench-tool", "bokeh", "matplotlib", "numpy", "pyserial", "reflex", "scipy")
+    versions: dict[str, str] = {}
+    for name in names:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = "not-installed"
+    return versions

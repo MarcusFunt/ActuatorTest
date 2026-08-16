@@ -7,10 +7,9 @@ import json
 import math
 import queue
 import random
-import struct
 import threading
 import time
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 try:
     import serial
@@ -28,7 +27,6 @@ from .actuator_protocol import (
     PacketParser,
     PacketType,
     ProtocolError,
-    ResponsePayload,
     ResponseStatus,
     TelemetryPayload,
     decode_command_payload,
@@ -1083,10 +1081,27 @@ class ActuatorClient:
         self._reader_thread: threading.Thread | None = None
         self._sequence = 0
         self._sequence_lock = threading.Lock()
+        # The protocol uses a single response queue, so exactly one command may
+        # own a request/response exchange at a time.  This also protects callers
+        # outside the Reflex UI (scripts and future integrations).
+        self._command_lock = threading.RLock()
+        self._callback_errors: queue.Queue[str] = queue.Queue()
 
     @property
     def parser_stats(self):
         return self._parser.stats
+
+    @property
+    def callback_error_count(self) -> int:
+        return self._callback_errors.qsize()
+
+    def drain_callback_errors(self) -> list[str]:
+        errors: list[str] = []
+        while True:
+            try:
+                errors.append(self._callback_errors.get_nowait())
+            except queue.Empty:
+                return errors
 
     @property
     def is_connected(self) -> bool:
@@ -1101,6 +1116,10 @@ class ActuatorClient:
 
     def add_event_callback(self, callback: EventCallback) -> None:
         self._event_callbacks.append(callback)
+
+    def remove_event_callback(self, callback: EventCallback) -> None:
+        if callback in self._event_callbacks:
+            self._event_callbacks.remove(callback)
 
     def connect(self) -> None:
         self.transport.open()
@@ -1137,6 +1156,13 @@ class ActuatorClient:
             for frame in self._parser.feed(data):
                 self._handle_frame(frame)
 
+    def _invoke_callback(self, kind: str, callback: Callable[[Any], None], value: Any) -> None:
+        """Keep observer failures from taking down the protocol reader thread."""
+        try:
+            callback(value)
+        except Exception as exc:  # Callbacks are third-party/UI/reporting code.
+            self._callback_errors.put(f"{kind} callback {callback!r} failed: {exc}")
+
     def _handle_frame(self, frame: Frame) -> None:
         if frame.packet_type == PacketType.RESPONSE:
             try:
@@ -1161,12 +1187,12 @@ class ActuatorClient:
             sample = TelemetrySample.from_payload(payload)
             self.telemetry_store.add(sample)
             for callback in list(self._telemetry_callbacks):
-                callback(sample)
+                self._invoke_callback("telemetry", callback, sample)
             return
 
         if frame.packet_type == PacketType.EVENT:
             for callback in list(self._event_callbacks):
-                callback(frame)
+                self._invoke_callback("event", callback, frame)
 
     def command(
         self,
@@ -1176,15 +1202,16 @@ class ActuatorClient:
         timeout: float = 1.0,
         require_ok: bool = True,
     ) -> CommandResponse:
-        if not self.transport.is_open:
-            raise ActuatorError("transport is not open")
-        sequence = self._next_sequence()
-        payload = encode_command_payload(command, data)
-        self.transport.write(encode_frame(PacketType.COMMAND, sequence, payload))
-        response = self._wait_response(command, sequence, timeout)
-        if require_ok and response.status != ResponseStatus.OK:
-            raise ActuatorCommandError(f"{command.name} failed with {response.status.name}")
-        return response
+        with self._command_lock:
+            if not self.transport.is_open:
+                raise ActuatorError("transport is not open")
+            sequence = self._next_sequence()
+            payload = encode_command_payload(command, data)
+            self.transport.write(encode_frame(PacketType.COMMAND, sequence, payload))
+            response = self._wait_response(command, sequence, timeout)
+            if require_ok and response.status != ResponseStatus.OK:
+                raise ActuatorCommandError(f"{command.name} failed with {response.status.name}")
+            return response
 
     def _wait_response(self, command: CommandID, sequence: int, timeout: float) -> CommandResponse:
         deadline = time.monotonic() + timeout
@@ -1379,3 +1406,51 @@ class ActuatorClient:
 
     def save_config(self, timeout: float = 1.0) -> None:
         self.command(CommandID.SAVE_CONFIG, timeout=timeout)
+
+    def apply_config_verified(self, values: dict[str, Any], timeout: float = 1.0) -> dict[str, Any]:
+        """Apply a complete config set with read-back verification and rollback.
+
+        The current firmware exposes key-at-a-time writes rather than a native
+        transaction.  Holding the command lock prevents interleaving; on any
+        failure the prior values are restored and persisted where possible.
+        """
+        with self._command_lock:
+            previous = self.get_config(timeout=timeout)
+            try:
+                for key, value in values.items():
+                    self.set_config(key, value, timeout=timeout)
+                staged = self.get_config(timeout=timeout)
+                self._assert_config_matches(values, staged)
+                self.save_config(timeout=timeout)
+                persisted = self.get_config(timeout=timeout)
+                self._assert_config_matches(values, persisted)
+                return persisted
+            except Exception as exc:
+                rollback_errors: list[str] = []
+                for key in values:
+                    if key not in previous:
+                        continue
+                    try:
+                        self.set_config(key, previous[key], timeout=timeout)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"{key}: {rollback_exc}")
+                try:
+                    self.save_config(timeout=timeout)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"SAVE_CONFIG: {rollback_exc}")
+                detail = f"; rollback failed ({'; '.join(rollback_errors)})" if rollback_errors else ""
+                raise ActuatorError(f"config apply failed and rollback was attempted: {exc}{detail}") from exc
+
+    @staticmethod
+    def _assert_config_matches(expected: dict[str, Any], actual: dict[str, Any]) -> None:
+        mismatches: list[str] = []
+        for key, value in expected.items():
+            observed = actual.get(key)
+            if isinstance(value, float) and isinstance(observed, (float, int)):
+                matches = math.isclose(value, float(observed), rel_tol=1e-6, abs_tol=1e-8)
+            else:
+                matches = observed == value
+            if not matches:
+                mismatches.append(key)
+        if mismatches:
+            raise ActuatorError(f"config read-back mismatch: {', '.join(mismatches)}")

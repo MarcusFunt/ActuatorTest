@@ -14,7 +14,7 @@ Frame layout:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum, IntFlag
+from enum import IntEnum, IntFlag
 import struct
 from typing import Iterable
 

@@ -14,7 +14,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Callable
 
 # Make sure the src package is importable when running from the project root.
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -23,7 +22,6 @@ from actuator_tool.actuator_data import TelemetryStore
 from actuator_tool.actuator_protocol import ActuatorMode
 from actuator_tool.actuator_serial import (
     ActuatorClient,
-    ActuatorError,
     PySerialTransport,
     scan_serial_ports,
 )
@@ -39,7 +37,6 @@ from actuator_tool.actuator_tests import (
 )
 from actuator_tool.config_schema import CalibrationConfig, SafetyLimits
 from actuator_tool.actuator_report import (
-    SessionReport,
     create_session_folder,
     plot_deflection,
     plot_ratio,

@@ -10,10 +10,17 @@ def _port(name: str, default: int) -> int:
         return default
 
 
+def _loopback_host(name: str) -> str:
+    host = os.environ.get(name, "127.0.0.1").strip().lower()
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        raise RuntimeError(f"{name} must be a loopback address for the bench tool")
+    return host
+
+
 _backend_port = _port("REFLEX_BACKEND_PORT", 8001)
 _frontend_port = _port("REFLEX_FRONTEND_PORT", 3000)
-_backend_host = os.environ.get("REFLEX_BACKEND_HOST", "localhost")
-_frontend_host = os.environ.get("REFLEX_FRONTEND_HOST", "localhost")
+_backend_host = _loopback_host("REFLEX_BACKEND_HOST")
+_frontend_host = _loopback_host("REFLEX_FRONTEND_HOST")
 
 # RadixThemesPlugin was removed in newer Reflex releases.  Keeping it when
 # available preserves the intended dark theme on older supported versions,
@@ -33,6 +40,9 @@ config = rx.Config(
     frontend_port=_frontend_port,
     api_url=os.environ.get("REFLEX_API_URL", f"http://{_backend_host}:{_backend_port}"),
     deploy_url=os.environ.get("REFLEX_DEPLOY_URL", f"http://{_frontend_host}:{_frontend_port}"),
-    cors_allowed_origins=["*"],
+    cors_allowed_origins=[
+        f"http://localhost:{_frontend_port}",
+        f"http://127.0.0.1:{_frontend_port}",
+    ],
     plugins=_plugins,
 )

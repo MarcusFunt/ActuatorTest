@@ -56,9 +56,7 @@ def _check_python_version() -> None:
     if sys.version_info < MIN_PYTHON:
         required = ".".join(str(part) for part in MIN_PYTHON)
         current = ".".join(str(part) for part in sys.version_info[:3])
-        raise SystemExit(
-            f"Python {required} or newer is required; current Python is {current}."
-        )
+        raise SystemExit(f"Python {required} or newer is required; current Python is {current}.")
 
 
 def _run(
@@ -99,8 +97,9 @@ def _modules_available(python: Path) -> bool:
 
 
 def _install_project(python: Path) -> None:
-    print("Installing actuator bench tool and dependencies")
-    _run([python, "-m", "pip", "install", "-e", ".[dev]"])
+    print("Installing locked actuator bench tool dependencies")
+    _run([python, "-m", "pip", "install", "-r", ROOT / "requirements.lock"])
+    _run([python, "-m", "pip", "install", "--no-deps", "-e", "."])
 
 
 def _bootstrap(argv: list[str]) -> int:

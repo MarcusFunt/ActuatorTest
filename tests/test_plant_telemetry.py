@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 
 from actuator_tool.actuator_data import TelemetrySample

@@ -1,6 +1,11 @@
 import pytest
 
-from actuator_gui.bokeh_charts import StickyRange, StickyRangeSpec, build_telemetry_series
+from actuator_gui.bokeh_charts import (
+    StickyRange,
+    StickyRangeSpec,
+    build_telemetry_series,
+    local_websocket_origins,
+)
 from actuator_tool.actuator_data import TelemetrySample
 
 
@@ -114,3 +119,14 @@ def test_sticky_range_minimum_span_keeps_idle_noise_readable():
     assert end - start == pytest.approx(0.12)
     assert start < -0.01
     assert end > 0.01
+
+
+def test_bokeh_origins_are_limited_to_loopback_frontend_and_server():
+    origins = local_websocket_origins(5006, frontend_port=3007)
+
+    assert origins == [
+        "localhost:5006",
+        "127.0.0.1:5006",
+        "localhost:3007",
+        "127.0.0.1:3007",
+    ]

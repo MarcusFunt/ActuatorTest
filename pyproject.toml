@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["build", "pytest", "ruff"]
 
 [project.scripts]
 actuator-gui = "actuator_tool.app_reflex:main"
@@ -30,3 +30,11 @@ include = ["actuator_tool*", "actuator_gui*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+extend-exclude = ["firmware"]
+
+[tool.ruff.lint]
+select = ["F"]

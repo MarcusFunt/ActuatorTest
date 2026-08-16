@@ -80,7 +80,8 @@ From the repository root, run:
 py .\run_app.py
 ```
 
-That command creates `.venv` if needed, installs this project in editable mode,
+That command creates `.venv` if needed, installs the checked-in locked dependency
+set and this project in editable mode,
 and starts the app with the simulator selected. Open:
 
 ```text
@@ -112,7 +113,8 @@ Windows PowerShell:
 
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\python -m pip install -r requirements.lock
+.\.venv\Scripts\python -m pip install --no-deps -e .
 .\.venv\Scripts\actuator-gui.exe
 ```
 
@@ -120,7 +122,8 @@ macOS/Linux:
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/python -m pip install -e ".[dev]"
+./.venv/bin/python -m pip install -r requirements.lock
+./.venv/bin/python -m pip install --no-deps -e .
 ./.venv/bin/actuator-gui
 ```
 
@@ -150,6 +153,26 @@ Or, if you installed manually and activated the environment:
 ```powershell
 python -m pytest
 ```
+
+## Developer checks
+
+The checked-in `requirements.lock` is the supported Python 3.11 dependency set.
+Use the task targets below after activating the virtual environment (or set
+`PYTHON=.venv/Scripts/python.exe` on Windows):
+
+```bash
+make install
+make lint
+make test
+make build
+```
+
+`make firmware` compiles the pinned Arduino source against the supported XIAO
+ESP32-C3 RISC-V compatibility target because PlatformIO's XIAO ESP32-C6 board
+metadata does not enable Arduino yet. Hardware validation on the actual C6 is
+manual: follow
+[`docs/HIL_SMOKE_CHECKLIST.md`](docs/HIL_SMOKE_CHECKLIST.md) only with an
+interlocked unloaded fixture and a present operator.
 
 ## Firmware
 

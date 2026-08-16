@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 import os
+import platform
 import subprocess
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import reflex as rx
 
-from actuator_tool.actuator_analysis import RatioFitResult, ResonanceResult
-from actuator_tool.actuator_data import ActuatorInfo, TelemetrySample, TelemetryStore
+from actuator_tool.actuator_data import TelemetrySample
 from actuator_tool.actuator_protocol import ActuatorMode, FaultFlags
 from actuator_tool.actuator_report import (
     SessionReport,
@@ -47,67 +43,7 @@ from actuator_tool.actuator_tests import (
 from actuator_tool.config_schema import CalibrationConfig, SafetyLimits
 
 from .bokeh_charts import BOKEH_PORT, launch_bokeh_thread
-
-
-# Backend context (non-serialisable; lives outside Reflex state)
-
-@dataclass
-class BackendCtx:
-    store: TelemetryStore = field(default_factory=TelemetryStore)
-    client: ActuatorClient | None = None
-    info: ActuatorInfo = field(default_factory=ActuatorInfo)
-    safety: SafetyLimits = field(default_factory=SafetyLimits)
-    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
-    ratio_fit: RatioFitResult | None = None
-    resonance_result: ResonanceResult | None = None
-    report: SessionReport | None = None
-    connected: bool = False
-    warnings: list[str] = field(default_factory=list)
-    logs: list[dict[str, str]] = field(default_factory=list)
-    _status: str = "Disconnected"
-    _log_seq: int = 0
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-
-    def set_status(self, msg: str) -> None:
-        with self._lock:
-            self._status = msg
-
-    def get_status(self) -> str:
-        with self._lock:
-            return self._status
-
-    def require_client(self) -> ActuatorClient:
-        if self.client is None or not self.connected:
-            raise ActuatorError("not connected")
-        return self.client
-
-    def add_log(self, kind: str, tag: str, message: str) -> None:
-        kind = kind.lower()
-        with self._lock:
-            self._log_seq += 1
-            self.logs.append(
-                {
-                    "id": str(self._log_seq),
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "kind": kind,
-                    "class_name": f"log-tag {kind}",
-                    "tag": tag.upper(),
-                    "message": message,
-                }
-            )
-            del self.logs[:-300]
-
-    def clear_logs(self) -> None:
-        with self._lock:
-            self.logs.clear()
-
-    def get_logs(self) -> list[dict[str, str]]:
-        with self._lock:
-            return [dict(entry) for entry in self.logs]
-
-
-_ctx = BackendCtx()
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="actuator")
+from .backend import BackendCtx, ctx as _ctx, executor as _executor
 
 _bokeh_started = False
 
@@ -278,6 +214,43 @@ def _read_device_config() -> dict[str, Any]:
     return cfg
 
 
+def _device_config_values(cal: CalibrationConfig) -> dict[str, Any]:
+    """Return the complete firmware-owned subset of a calibration config."""
+    return {
+        "output_per_motor": cal.output_per_motor,
+        "output_offset_rad": cal.output_offset_rad,
+        "pid_enabled": cal.pid_enabled,
+        "pid_kp": cal.pid_kp,
+        "pid_ki": cal.pid_ki,
+        "pid_kd": cal.pid_kd,
+        "pid_i_limit_motor_rad": cal.pid_i_limit_motor_rad,
+        "pid_output_limit_motor_rad": cal.pid_output_limit_motor_rad,
+        "velocity_pid_kp": cal.velocity_pid_kp,
+        "velocity_pid_ki": cal.velocity_pid_ki,
+        "velocity_pid_i_limit_motor_rad": cal.velocity_pid_i_limit_motor_rad,
+        "torque_proxy_kp": cal.torque_proxy_kp,
+        "torque_proxy_limit_rad": cal.torque_proxy_limit_rad,
+        "torque_proxy_max_motor_velocity_rad_s": cal.torque_proxy_max_motor_velocity_rad_s,
+        "torque_proxy_timeout_s": cal.torque_proxy_timeout_s,
+        "missed_step_correction_enabled": cal.missed_step_correction_enabled,
+        "missed_step_warn_motor_rad": cal.missed_step_warn_motor_rad,
+        "missed_step_fault_motor_rad": cal.missed_step_fault_motor_rad,
+        "missed_step_correction_rate": cal.missed_step_correction_rate,
+        "current_control_enabled": cal.current_control_enabled,
+        "idle_current_ma": cal.idle_current_ma,
+        "hold_current_ma": cal.hold_current_ma,
+        "run_current_ma": cal.run_current_ma,
+        "current_downshift_delay_s": cal.current_downshift_delay_s,
+        "autotune_max_amplitude_rad": cal.autotune_max_amplitude_rad,
+        "autotune_max_duration_s": cal.autotune_max_duration_s,
+        "autotune_max_deflection_rad": cal.autotune_max_deflection_rad,
+        "backlash_motor_rad": cal.backlash_motor_rad,
+        "backlash_comp_enabled": cal.backlash_comp_enabled,
+        "resonance_frequency_hz": cal.resonance_frequency_hz,
+        "resonance_derating_enabled": cal.resonance_derating_enabled,
+    }
+
+
 def _apply_ui_config(
     safety_values: dict[str, float],
     cal_values: dict[str, Any],
@@ -292,9 +265,9 @@ def _apply_ui_config(
         max_move_rad=safety_values["max_move_rad"],
     )
     safety.validate()
-    ctx.safety = safety
-
-    cal = ctx.calibration
+    # Do not update UI-side limits until the device accepts and confirms the
+    # complete firmware-owned configuration.
+    cal = copy.deepcopy(ctx.calibration)
     cal.max_safe_velocity_rad_s = safety.max_velocity_rad_s
     cal.max_safe_accel_rad_s2 = safety.max_accel_rad_s2
     cal.output_per_motor = cal_values["output_per_motor"]
@@ -331,49 +304,17 @@ def _apply_ui_config(
     cal.resonance_derating_enabled = cal_values["resonance_derating_enabled"]
     cal.validate()
 
+    if ctx.connected:
+        client = ctx.require_client()
+        persisted = client.apply_config_verified(_device_config_values(cal))
+        _sync_calibration_from_config(ctx, persisted)
+        _log("tx", "TX", "verified SET_CONFIG transaction and SAVE_CONFIG")
+
+    ctx.safety = safety
+    ctx.calibration = cal
     if ctx.client is not None:
         ctx.client.max_velocity_rad_s = safety.max_velocity_rad_s
         ctx.client.max_accel_rad_s2 = safety.max_accel_rad_s2
-
-    if ctx.connected:
-        client = ctx.require_client()
-        for key, value in [
-            ("output_per_motor", cal.output_per_motor),
-            ("output_offset_rad", cal.output_offset_rad),
-            ("pid_enabled", cal.pid_enabled),
-            ("pid_kp", cal.pid_kp),
-            ("pid_ki", cal.pid_ki),
-            ("pid_kd", cal.pid_kd),
-            ("pid_i_limit_motor_rad", cal.pid_i_limit_motor_rad),
-            ("pid_output_limit_motor_rad", cal.pid_output_limit_motor_rad),
-            ("velocity_pid_kp", cal.velocity_pid_kp),
-            ("velocity_pid_ki", cal.velocity_pid_ki),
-            ("velocity_pid_i_limit_motor_rad", cal.velocity_pid_i_limit_motor_rad),
-            ("torque_proxy_kp", cal.torque_proxy_kp),
-            ("torque_proxy_limit_rad", cal.torque_proxy_limit_rad),
-            ("torque_proxy_max_motor_velocity_rad_s", cal.torque_proxy_max_motor_velocity_rad_s),
-            ("torque_proxy_timeout_s", cal.torque_proxy_timeout_s),
-            ("missed_step_correction_enabled", cal.missed_step_correction_enabled),
-            ("missed_step_warn_motor_rad", cal.missed_step_warn_motor_rad),
-            ("missed_step_fault_motor_rad", cal.missed_step_fault_motor_rad),
-            ("missed_step_correction_rate", cal.missed_step_correction_rate),
-            ("current_control_enabled", cal.current_control_enabled),
-            ("idle_current_ma", cal.idle_current_ma),
-            ("hold_current_ma", cal.hold_current_ma),
-            ("run_current_ma", cal.run_current_ma),
-            ("current_downshift_delay_s", cal.current_downshift_delay_s),
-            ("autotune_max_amplitude_rad", cal.autotune_max_amplitude_rad),
-            ("autotune_max_duration_s", cal.autotune_max_duration_s),
-            ("autotune_max_deflection_rad", cal.autotune_max_deflection_rad),
-            ("backlash_motor_rad", cal.backlash_motor_rad),
-            ("backlash_comp_enabled", cal.backlash_comp_enabled),
-            ("resonance_frequency_hz", cal.resonance_frequency_hz),
-            ("resonance_derating_enabled", cal.resonance_derating_enabled),
-        ]:
-            client.set_config(key, value)
-            _log("tx", "TX", f"SET_CONFIG {key}={value}")
-        client.save_config()
-        _log("tx", "TX", "SAVE_CONFIG")
 
     if ctx.report:
         ctx.report.save_calibration(cal)
@@ -386,35 +327,53 @@ def _apply_ui_config(
 
 def _connect(use_sim: bool, port: str) -> None:
     c = _ctx
+    c.set_lifecycle("connecting")
     transport = SimulatedTransport() if use_sim else PySerialTransport(port)
     c.store.clear()
     client = ActuatorClient(transport, c.store)
     client.max_velocity_rad_s = c.safety.max_velocity_rad_s
     client.max_accel_rad_s2 = c.safety.max_accel_rad_s2
-    client.connect()
-    client.set_mode(ActuatorMode.DISABLED, timeout=0.5)
-    info = client.info(timeout=1.0)
     try:
-        cfg = client.get_config(timeout=0.5)
-        _sync_calibration_from_config(c, cfg)
-    except Exception as exc:
-        _log("event", "EVENT", f"GET_CONFIG skipped: {exc}")
-    client.start_stream(timeout=0.5)
-    report = _new_report()
-    report.save_actuator_info(info)
-    report.events.write("connect", {"simulator": use_sim, "port": port})
-    client.add_telemetry_callback(report.recorder.record_sample)
-    c.client = client
-    c.info = info
-    c.report = report
-    c.connected = True
-    c.set_status(f"Connected to {info.actuator_id}")
-    _log("event", "EVENT", f"connected via {'simulator' if use_sim else port}")
-    _log("rx", "RX", f"INFO {info.actuator_id} {info.firmware_version} {info.hardware_revision}")
+        client.connect()
+        client.set_mode(ActuatorMode.DISABLED, timeout=0.5)
+        info = client.info(timeout=1.0)
+        try:
+            cfg = client.get_config(timeout=0.5)
+            _sync_calibration_from_config(c, cfg)
+        except Exception as exc:
+            _log("event", "EVENT", f"GET_CONFIG skipped: {exc}")
+        client.start_stream(timeout=0.5)
+        report = _new_report()
+        report.save_actuator_info(info)
+        manifest_hash = report.write_run_manifest(
+            connection={"simulator": use_sim, "port": port, "transport": type(transport).__name__},
+            info=info,
+            safety=c.safety,
+            calibration=c.calibration,
+        )
+        report.events.write(
+            "connect",
+            {"simulator": use_sim, "port": port, "manifest_sha256": manifest_hash},
+        )
+        client.add_telemetry_callback(report.recorder.record_sample)
+        c.client = client
+        c.info = info
+        c.report = report
+        c.connected = True
+        c.set_lifecycle("ready")
+        c.set_status(f"Connected to {info.actuator_id}")
+        _log("event", "EVENT", f"connected via {'simulator' if use_sim else port}")
+        _log("rx", "RX", f"INFO {info.actuator_id} {info.firmware_version} {info.hardware_revision}")
+    except Exception:
+        client.disconnect()
+        c.connected = False
+        c.set_lifecycle("faulted")
+        raise
 
 
 def _disconnect() -> None:
     c = _ctx
+    c.set_lifecycle("disconnecting")
     if c.client is not None:
         c.client.disconnect()
     if c.report is not None:
@@ -423,6 +382,7 @@ def _disconnect() -> None:
     c.connected = False
     c.client = None
     c.report = None
+    c.set_lifecycle("idle")
     c.set_status("Disconnected")
     _log("event", "EVENT", "disconnected")
 
@@ -790,30 +750,36 @@ class State(rx.State):
     active_tab: str = "overview"
     sidebar_collapsed: bool = False
     busy: bool = False
+    lifecycle: str = "idle"
+    telemetry_chart_nonce: int = 0
+
+    @rx.var
+    def telemetry_chart_url(self) -> str:
+        return f"http://localhost:{BOKEH_PORT}/?reload={self.telemetry_chart_nonce}"
 
     @rx.var
     def can_control(self) -> bool:
-        return self.connected and not self.busy
+        return self.connected and self.lifecycle == "ready" and not self.busy
 
     @rx.var
     def can_test(self) -> bool:
-        return self.connected and self.mode_name == "CALIBRATION" and not self.busy
+        return self.can_control and self.mode_name == "CALIBRATION"
 
     @rx.var
     def can_position(self) -> bool:
-        return self.connected and self.mode_name == "POSITION" and not self.busy
+        return self.can_control and self.mode_name == "POSITION"
 
     @rx.var
     def can_velocity(self) -> bool:
-        return self.connected and self.mode_name == "VELOCITY" and not self.busy
+        return self.can_control and self.mode_name == "VELOCITY"
 
     @rx.var
     def can_torque_proxy(self) -> bool:
-        return self.connected and self.mode_name == "TORQUE_PROXY" and not self.busy
+        return self.can_control and self.mode_name == "TORQUE_PROXY"
 
     @rx.var
     def can_autotune(self) -> bool:
-        return self.connected and self.mode_name in ("POSITION", "VELOCITY") and not self.busy
+        return self.can_control and self.mode_name in ("POSITION", "VELOCITY")
 
     @rx.var
     def visible_log_entries(self) -> list[dict[str, str]]:
@@ -1102,6 +1068,7 @@ class State(rx.State):
         async with self:
             self.busy = True
             self.status = "Connecting..."
+            self.lifecycle = "connecting"
             use_sim, port = self.use_sim, self.port
         loop = asyncio.get_event_loop()
         try:
@@ -1112,6 +1079,7 @@ class State(rx.State):
                 self.firmware = _ctx.info.firmware_version
                 self.hardware = _ctx.info.hardware_revision
                 self.mode_name = ActuatorMode.DISABLED.name
+                self.lifecycle = _ctx.lifecycle
                 self.status = _ctx.get_status()
                 self._sync_results()
                 self._sync_config()
@@ -1120,15 +1088,18 @@ class State(rx.State):
             _log("fault", "FAULT", f"Connect failed: {exc}")
             async with self:
                 self.status = f"Connect failed: {exc}"
+                self.lifecycle = _ctx.lifecycle
                 self.log_entries = _ctx.get_logs()
         finally:
             async with self:
                 self.busy = False
+                self.lifecycle = _ctx.lifecycle
 
     @rx.event(background=True)
     async def do_disconnect(self) -> None:
         async with self:
             self.busy = True
+            self.lifecycle = "disconnecting"
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(_executor, _disconnect)
@@ -1138,6 +1109,7 @@ class State(rx.State):
                 self.fault_text = ""
                 self.control_status_text = "No control status read yet"
                 self.status = "Disconnected"
+                self.lifecycle = _ctx.lifecycle
                 self.log_entries = _ctx.get_logs()
         except Exception as exc:
             _log("fault", "FAULT", f"Disconnect error: {exc}")
@@ -1147,6 +1119,7 @@ class State(rx.State):
         finally:
             async with self:
                 self.busy = False
+                self.lifecycle = _ctx.lifecycle
 
     def _set_status(self, message: str, kind: str = "event", tag: str = "EVENT") -> None:
         _ctx.set_status(message)
@@ -1192,21 +1165,26 @@ class State(rx.State):
         loop = asyncio.get_event_loop()
         try:
             _log("tx", "TX", tx_label)
+            _ctx.set_lifecycle("testing")
             await loop.run_in_executor(_executor, fn)
+            _ctx.set_lifecycle("ready")
             _ctx.set_status(success_message)
             _log("event", "EVENT", success_message)
             async with self:
                 self.status = success_message
                 self.log_entries = _ctx.get_logs()
         except Exception as exc:
-            _ctx.set_status(str(exc))
+            _ctx.mark_fault(str(exc))
             _log("fault", "FAULT", str(exc))
             async with self:
                 self.status = str(exc)
                 self.log_entries = _ctx.get_logs()
         finally:
+            if _ctx.connected and _ctx.lifecycle != "faulted":
+                _ctx.set_lifecycle("ready")
             async with self:
                 self.busy = False
+                self.lifecycle = _ctx.lifecycle
 
     @rx.event(background=True)
     async def do_position_abs(self) -> None:
@@ -1343,6 +1321,8 @@ class State(rx.State):
         try:
             _log("tx", "TX", "ESTOP")
             _ctx.require_client().estop()
+            _ctx.mark_fault("ESTOP sent")
+            self.lifecycle = "faulted"
             self._set_status("ESTOP sent", "fault", "FAULT")
         except Exception as exc:
             self._set_status(str(exc), "fault", "FAULT")
@@ -1353,6 +1333,8 @@ class State(rx.State):
             client = _ctx.require_client()
             client.clear_faults()
             client.set_mode(ActuatorMode.DISABLED)
+            _ctx.set_lifecycle("ready")
+            self.lifecycle = "ready"
             self._set_status("Faults cleared")
         except Exception as exc:
             self._set_status(str(exc), "fault", "FAULT")
@@ -1500,7 +1482,9 @@ class State(rx.State):
             _log("event", "EVENT", self.status)
         loop = asyncio.get_event_loop()
         try:
+            _ctx.set_lifecycle("testing")
             await loop.run_in_executor(_executor, fn)
+            _ctx.set_lifecycle("ready")
             async with self:
                 self.status = _ctx.get_status()
                 done_state = "warn" if len(_ctx.warnings) > start_warning_count else "pass"
@@ -1510,6 +1494,7 @@ class State(rx.State):
                 self.log_entries = _ctx.get_logs()
             return True
         except Exception as exc:
+            _ctx.mark_fault(f"{label} failed: {exc}")
             _log("fault", "FAULT", f"{label} failed: {exc}")
             async with self:
                 self.status = f"{label} failed: {exc}"
@@ -1517,8 +1502,11 @@ class State(rx.State):
                 self.log_entries = _ctx.get_logs()
             return False
         finally:
+            if _ctx.connected and _ctx.lifecycle != "faulted":
+                _ctx.set_lifecycle("ready")
             async with self:
                 self.busy = False
+                self.lifecycle = _ctx.lifecycle
 
     def _set_test_ui(self, key: str, state: str, result: str) -> None:
         state_attr, result_attr = TEST_ATTRS[key]
@@ -1754,7 +1742,22 @@ class State(rx.State):
         if _ctx.report is None:
             self.status = "No active report session"
             return
-        subprocess.Popen(["explorer", str(_ctx.report.artifacts.folder.resolve())])
+        folder = str(_ctx.report.artifacts.folder.resolve())
+        try:
+            if platform.system() == "Windows":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except OSError as exc:
+            self.status = f"Could not open report folder: {folder} ({exc})"
+
+    def reconnect_telemetry(self) -> None:
+        """Reload the embedded Bokeh document to obtain a fresh session token."""
+        self.telemetry_chart_nonce += 1
+        self.status = "Reloading live telemetry chart"
+        _log("event", "EVENT", self.status)
 
     @rx.event(background=True)
     async def start_polling(self) -> None:
@@ -1765,6 +1768,11 @@ class State(rx.State):
             await asyncio.sleep(0.5)
             latest = _ctx.store.latest()
             stats = _ctx.store.stats
+            client = _ctx.client
+            if client is not None:
+                for callback_error in client.drain_callback_errors():
+                    _ctx.warnings.append(callback_error)
+                    _log("fault", "CALLBACK", callback_error)
             if latest is not None and stats.total_samples - last_logged_sample >= 500:
                 _log(
                     "rx",
@@ -1777,9 +1785,12 @@ class State(rx.State):
                 _log("fault", "FAULT", fault_text)
             if fault_text:
                 last_fault_text = fault_text
+                if fault_text != "NONE":
+                    _ctx.mark_fault(f"Actuator fault: {fault_text}")
             async with self:
                 self.status = _ctx.get_status()
                 self.connected = _ctx.connected
+                self.lifecycle = _ctx.lifecycle
                 if _ctx.connected:
                     self.actuator_id = _ctx.info.actuator_id
                     self.firmware = _ctx.info.firmware_version
@@ -2088,7 +2099,7 @@ def header_panel() -> rx.Component:
             ),
             rx.box(class_name="hdr-spacer"),
             rx.text(State.status, class_name="hdr-status"),
-            _icon_btn("ESTOP", "square", State.do_estop, disabled=~State.can_control, variant="estop"),
+            _icon_btn("ESTOP", "square", State.do_estop, disabled=~State.connected, variant="estop"),
             class_name="hdr",
             width="100%",
         )
@@ -2354,9 +2365,10 @@ def overview_tab() -> rx.Component:
         ),
         rx.box(
             rx.box(
-                rx.box(
-                    rx.text("Live Telemetry", class_name="cc-title"),
-                    rx.el.iframe(src=f"http://localhost:{BOKEH_PORT}", class_name="telemetry-frame"),
+                    rx.box(
+                        rx.text("Live Telemetry", class_name="cc-title"),
+                    _btn("Reconnect chart", State.reconnect_telemetry, variant="ghost"),
+                    rx.el.iframe(src=State.telemetry_chart_url, class_name="telemetry-frame"),
                     class_name="cc",
                 ),
                 class_name="chart-stack",

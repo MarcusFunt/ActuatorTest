@@ -14,3 +14,15 @@ build/
 dist/
 *.egg-info/
 reports/
+
+# Local tools and generated diagnostics.
+.ui-test-venv/
+.playwright-cli/
+launch_*.txt
+.pio/
+
+# Environment and dependency tooling.
+.python-version
+.coverage
+coverage.xml
+htmlcov/

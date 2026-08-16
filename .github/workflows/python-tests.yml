@@ -7,7 +7,7 @@ on:
     branches: [master]
 
 jobs:
-  pytest:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,7 +15,33 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - name: Install
-        run: python -m pip install -e '.[dev]'
-      - name: Test
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+      - name: Format and lint
+        run: |
+          python -m ruff format --check tests/test_report_provenance.py rxconfig.py run_app.py
+          python -m ruff check .
+      - name: Test simulator and host package
         run: python -m pytest -q
+      - name: Build package
+        run: python -m build --no-isolation
+      - name: Dependency audit
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r requirements.lock
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Compile ESP32-C6 firmware
+        run: |
+          python -m pip install platformio==6.1.18 intelhex==2.3.0
+          python -m platformio run
